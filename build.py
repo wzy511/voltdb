@@ -250,6 +250,7 @@ CTX.INPUT['catalog'] = """
 
 CTX.INPUT['structures'] = """
  ContiguousAllocator.cpp
+ CompactingPool.cpp
 """
 
 CTX.INPUT['common'] = """
@@ -277,6 +278,7 @@ CTX.INPUT['common'] = """
  ValueFactory.cpp
  MiscUtil.cpp
  debuglog.cpp
+ SynchronizedThreadLock.cpp
 """
 
 CTX.INPUT['execution'] = """

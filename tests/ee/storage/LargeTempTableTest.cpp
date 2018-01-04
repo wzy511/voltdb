@@ -46,6 +46,10 @@
 using namespace voltdb;
 
 class LargeTempTableTest : public TupleComparingTest {
+public:
+    ~LargeTempTableTest() {
+        voltdb::globalDestroyOncePerProcess();
+    }
 };
 
 // Use boost::optional to represent null values

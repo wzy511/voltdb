@@ -32,6 +32,7 @@
 #include "common/RecoveryProtoMessage.h"
 #include "common/serializeio.h"
 #include "common/SegvException.hpp"
+#include "common/SynchronizedThreadLock.h"
 #include "common/types.h"
 
 #include <signal.h>
@@ -371,6 +372,7 @@ typedef struct {
     int64_t lastCommittedSpHandle;
     int64_t uniqueId;
     int32_t remoteClusterId;
+    int32_t remotePartitionId;
     int64_t undoToken;
     char log[0];
 }__attribute__((packed)) apply_binary_log;
@@ -626,12 +628,13 @@ int8_t VoltDBIPC::initialize(struct ipc_command *cmd) {
         int clusterId;
         long siteId;
         int partitionId;
+        int sitesPerHost;
         int hostId;
         int drClusterId;
         int defaultDrBufferSize;
         int64_t logLevels;
         int64_t tempTableMemory;
-        int32_t createDrReplicatedStream;
+        int32_t isLowestSiteId;
         int32_t hostnameLength;
         char data[0];
     }__attribute__((packed));
@@ -644,13 +647,14 @@ int8_t VoltDBIPC::initialize(struct ipc_command *cmd) {
     cs->clusterId = ntohl(cs->clusterId);
     cs->siteId = ntohll(cs->siteId);
     cs->partitionId = ntohl(cs->partitionId);
+    cs->sitesPerHost = ntohl(cs->sitesPerHost);
     cs->hostId = ntohl(cs->hostId);
     cs->drClusterId = ntohl(cs->drClusterId);
     cs->defaultDrBufferSize = ntohl(cs->defaultDrBufferSize);
     cs->logLevels = ntohll(cs->logLevels);
     cs->tempTableMemory = ntohll(cs->tempTableMemory);
-    cs->createDrReplicatedStream = ntohl(cs->createDrReplicatedStream);
-    bool createDrReplicatedStream = cs->createDrReplicatedStream != 0;
+    cs->isLowestSiteId = ntohl(cs->isLowestSiteId);
+    bool isLowestSiteId = cs->isLowestSiteId != 0;
     cs->hostnameLength = ntohl(cs->hostnameLength);
 
     std::string hostname(cs->data, cs->hostnameLength);
@@ -675,12 +679,13 @@ int8_t VoltDBIPC::initialize(struct ipc_command *cmd) {
         m_engine->initialize(cs->clusterId,
                              cs->siteId,
                              cs->partitionId,
+                             cs->sitesPerHost,
                              cs->hostId,
                              hostname,
                              cs->drClusterId,
                              cs->defaultDrBufferSize,
                              cs->tempTableMemory,
-                             createDrReplicatedStream);
+                             isLowestSiteId);
         return kErrorCode_Success;
     }
     catch (const FatalException &e) {
@@ -1642,6 +1647,7 @@ void VoltDBIPC::applyBinaryLog(struct ipc_command *cmd) {
                                         ntohll(params->lastCommittedSpHandle),
                                         ntohll(params->uniqueId),
                                         ntohl(params->remoteClusterId),
+                                        ntohl(params->remotePartitionId),
                                         ntohll(params->undoToken),
                                         params->log);
         char response[9];
@@ -1889,6 +1895,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    SynchronizedThreadLock::destroy();
     fflush(stdout);
     return 0;
 }
