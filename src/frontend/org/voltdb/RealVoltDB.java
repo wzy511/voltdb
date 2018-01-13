@@ -104,7 +104,6 @@ import org.voltcore.zk.ZKCountdownLatch;
 import org.voltcore.zk.ZKUtil;
 import org.voltdb.CatalogContext.CatalogJarWriteMode;
 import org.voltdb.ProducerDRGateway.MeshMemberInfo;
-import org.voltdb.TheHashinator.HashinatorType;
 import org.voltdb.VoltDB.Configuration;
 import org.voltdb.catalog.Catalog;
 import org.voltdb.catalog.CatalogMap;
@@ -239,9 +238,9 @@ public class RealVoltDB implements VoltDBInterface, RestoreAgent.Callback, HostM
     // Cluster settings reference and supplier
     final ClusterSettingsRef m_clusterSettings = new ClusterSettingsRef();
     private String m_buildString;
-    static final String m_defaultVersionString = "7.9";
+    static final String m_defaultVersionString = "8.0";
     // by default set the version to only be compatible with itself
-    static final String m_defaultHotfixableRegexPattern = "^\\Q7.9\\E\\z";
+    static final String m_defaultHotfixableRegexPattern = "^\\Q8.0\\E\\z";
     // these next two are non-static because they can be overrriden on the CLI for test
     private String m_versionString = m_defaultVersionString;
     private String m_hotfixableRegexPattern = m_defaultHotfixableRegexPattern;
@@ -1544,7 +1543,7 @@ public class RealVoltDB implements VoltDBInterface, RestoreAgent.Callback, HostM
 
             // Start elastic join service
             try {
-                if (m_config.m_isEnterprise && TheHashinator.getCurrentConfig().type == HashinatorType.ELASTIC) {
+                if (m_config.m_isEnterprise) {
                     Class<?> elasticServiceClass = MiscUtils.loadProClass("org.voltdb.join.ElasticJoinCoordinator",
                                                                           "Elastic join", false);
 
@@ -2469,18 +2468,6 @@ public class RealVoltDB implements VoltDBInterface, RestoreAgent.Callback, HostM
             if (pt != null) {
                 m_config.m_partitionDetectionEnabled = pt.isEnabled();
                 m_messenger.setPartitionDetectionEnabled(m_config.m_partitionDetectionEnabled);
-            }
-
-            final String elasticSetting = deployment.getCluster().getElastic().trim().toUpperCase();
-            if (elasticSetting.equals("ENABLED")) {
-                TheHashinator.setConfiguredHashinatorType(HashinatorType.ELASTIC);
-            } else if (!elasticSetting.equals("DISABLED")) {
-                VoltDB.crashLocalVoltDB("Error in deployment file,  elastic attribute of " +
-                                        "cluster element must be " +
-                                        "'enabled' or 'disabled' but was '" + elasticSetting + "'", false, null);
-            }
-            else {
-                TheHashinator.setConfiguredHashinatorType(HashinatorType.LEGACY);
             }
 
             // log system setting information
