@@ -18,8 +18,16 @@
 -- {@optionalfn = "_numfun"}
 -- {@plus10 = " + 10"}
 -- {@star = "*"}
--- {@updatecolumn = "CASH"}
--- {@updatevalue = "_value[decimal]"}
+-- {@updatecolumn = "NUM"}
+-- {@updatesource = "ID"}
+-- {@updatevalue = "_value[int:0,100]"}
+-- {@updatecolumn2 = "RATIO"} -- rarely used; so far, only in CTE tests
+-- {@maxdepth = "6"} -- maximum depth, in Recursive CTE tests
+
+--- Define "place-holders" used in some of the queries below
+{_optionalorderbyidlimitoffset |= ""}
+{_optionalorderbyidlimitoffset |= "LIMIT 1000"}
+{_optionalorderbyidlimitoffset |= "ORDER BY @idcol _sortorder _optionallimit _optionaloffset"}
 
 -- alias fun
 -- ticket 231
@@ -153,3 +161,107 @@ SELECT @star FROM @fromtables Q38 WHERE CASE      Q38._variable[#arg @columntype
 SELECT @star FROM @fromtables Q39 WHERE CASE      Q39._variable[#arg @columntype] WHEN @comparableconstant THEN Q39._variable[#numone @columntype] @aftermath                              END @cmp (@comparableconstant@plus10)
 SELECT __[#numone]            Q40,      CASE        A._variable[#arg @columntype] WHEN @comparableconstant THEN   A._variable[#numone @columntype] @aftermath ELSE   A.__[#arg] @aftermath END FROM @fromtables A WHERE @columnpredicate
 SELECT __[#arg]               Q41,      CASE        A._variable[#arg @columntype] WHEN @comparableconstant THEN   A._variable[#numone @columntype] @aftermath                              END FROM @fromtables A WHERE @columnpredicate
+
+
+
+-- Prepare tables for (Recursive) CTE query tests: note that just two columns
+-- are updated to reference one other column, using a "standard tree" structure
+-- typical of Recursive CTE queries (similar to our Employee/Manager example),
+-- with one NULL value at the "top" of the tree; other columns remain random
+UPDATE @dmltable[#tab] Q67 SET @updatecolumn = (SELECT @updatesource FROM __[#tab] WHERE @idcol =  \
+    FLOOR( (SELECT MIN(@idcol) FROM __[#tab]) + (Q67.@idcol - (SELECT MIN(@idcol) FROM __[#tab]))/3 ) LIMIT 1)
+
+UPDATE @dmltable[#tab] Q68 SET @updatecolumn = NULL WHERE @idcol = (SELECT MIN(@idcol) FROM __[#tab])
+
+-- TODO: decide whether to keep this or not, which updates a second column,
+-- similar to the first but in a different order, so the "top" of the tree
+-- is no longer the "first" row (with the lowest ID), but in the middle:
+UPDATE @dmltable[#tab] Q69 SET @updatecolumn2 =  \
+    ( SELECT @updatecolumn FROM __[#tab] WHERE @idcol =  \
+    ( SELECT @idcol FROM __[#tab],  \
+    ( SELECT MAX(@idcol)+1 - MIN(@idcol) AS BASE, (MAX(@idcol)+1 - MIN(@idcol))/2 AS BD2 FROM __[#tab] ) AS B  \
+        WHERE MOD(@idcol + CAST(B.BD2 AS INTEGER), B.BASE) = MOD(Q69.@idcol, B.BASE) ) )
+
+
+-- TODO: temp, to check the data in both/all tables:
+SELECT * FROM @fromtables ORDER BY ID
+
+
+-- Basic (non-Recursive) CTE (Common Table Expression) query tests (i.e., using WITH):
+
+-- ... using a simple join and a simplified version of our standard Employee/Manager
+-- example (at least, when the @updatesource and @updatecolumn are used as the first
+-- two columns, it's kind of similar to that example)
+WITH CTE AS (  \
+    SELECT _variable[#ctec1 @columntype], _variable[#ctec2 @columntype], 1 AS DEPTH,  \
+        CAST(__[#ctec1] AS VARCHAR) AS PATH, _variable[#ctec5 numeric] AS TOTAL, _variable[#ctec6]  \
+        FROM @fromtables[#tab]  \
+)   SELECT Q70.__[#ctec1], Q70.__[#ctec2], COALESCE(CTE.DEPTH, 0) + 1 AS DEPTH,  \
+        COALESCE(CTE.PATH || '/', '') || Q70.__[#ctec1] AS PATH, CTE.TOTAL + Q70.__[#ctec5] AS TOTAL, Q70.__[#ctec6]  \
+        FROM __[#tab] Q70 _jointype JOIN CTE ON Q70.__[#ctec2] = CTE.__[#ctec1]
+        -- _optionalorderbyidlimitoffset
+
+-- ... with aggregate functions (implicit GROUP BY), and an implicit JOIN (but no explicit one)
+WITH CTE AS (  \
+    SELECT @agg(_variable[#ctec1 @columntype]) AG1, MIN(_variable[#ctec2 @columntype]) MN2, MAX(_variable[numeric]) MX3, COUNT(_variable) CT4 FROM @fromtables[#tab]  \
+)   SELECT @star FROM __[#tab] Q71, CTE
+-- _optionalorderbyidlimitoffset
+
+-- ... with aggregate functions (implicit GROUP BY), and an explicit JOIN
+WITH CTE AS (  \
+    SELECT @agg(_variable[#ctec1 @columntype]) AG1, MIN(_variable[#ctec2 @columntype]) MN2, MAX(_variable[numeric]) MX3, COUNT(_variable) CT4 FROM @fromtables[#tab]  \
+)   SELECT @star FROM __[#tab] Q72 _jointype JOIN CTE ON Q72.__[#ctec2] <= CTE.AG1
+-- _optionalorderbyidlimitoffset
+
+-- ... with an actual GROUP BY, in the CTE
+WITH CTE AS (  \
+    SELECT _variable[#ctec1 @columntype], @agg(_variable[#ctec2 @columntype]) AG1  \
+        FROM @fromtables[#tab] GROUP BY __[#ctec1]  \
+)   SELECT @star FROM __[#tab] Q73 _jointype JOIN CTE ON Q73.__[#ctec1] = CTE.__[#ctec1]
+-- _optionalorderbyidlimitoffset
+
+-- ... with an actual GROUP BY, in the CTE and in the main (final) query
+WITH CTE AS (  \
+    SELECT _variable[#ctec1 @columntype], _symbol[#agg1 @agg](_variable[#ctec2 @columntype]) AG1  \
+        FROM @fromtables[#tab] GROUP BY __[#ctec1]  \
+)   SELECT _variable[#grp], __[#agg1](Q74.__[#ctec2]) AG1, __[#agg1](AG1) AG2  \
+        FROM __[#tab] Q74 _jointype JOIN CTE ON Q74.__[#ctec1] = CTE.__[#ctec1]  \
+        GROUP BY __[#grp]
+-- _optionalorderbyidlimitoffset
+
+-- TODO: uncomment if we ever support more than one CTE (ENG-13575):
+--WITH CTE1 AS (  \
+--    SELECT _variable[#ctec1 @columntype], _symbol[#agg1 @agg](_variable[#ctec2 @columntype]) AG1  \
+--        FROM @fromtables[#tab] GROUP BY __[#ctec1]  \
+--    ), CTE2 AS (  \
+--        SELECT __[#ctec1] FROM CTE1  \
+--            WHERE AG1 > (SELECT MIN(AG1) FROM CTE1)  \
+--    )  \
+--SELECT __[#ctec1], _variable[#ctec3], __[#agg1](__[#ctec2]) AS AG1, _numagg(_variable[numeric]) AS AG2  \
+--    FROM __[#tab] WHERE __[#ctec1] IN (SELECT __[#ctec1] FROM CTE2)  \
+--    GROUP BY __[#ctec1], __[#ctec3] 
+--    -- _optionalorderbyidlimitoffset
+
+
+-- Recursive CTE query tests (i.e., using WITH RECURSIVE):
+
+-- ... using a version of our standard Employee/Manager example (at least, when
+-- the @updatesource and @updatecolumn are used as the first two columns, it's
+-- very similar to that example)
+
+WITH RECURSIVE RCTE (_variable[#rctec1 @columntype], _variable[#rctec2 @columntype], DEPTH, PATH, TOTAL, _variable[#rctec6]) AS (  \
+    SELECT __[#rctec1], __[#rctec2], 1, CAST(__[#rctec1] AS VARCHAR), _variable[#rctec5 numeric], __[#rctec6]  \
+        FROM @fromtables[#tab] WHERE __[#rctec2] IS NULL  \
+    UNION ALL  \
+    SELECT Q80.__[#rctec1], Q80.__[#rctec2], RCTE.DEPTH + 1, RCTE.PATH || '/' || Q80.__[#rctec1], RCTE.TOTAL + Q80.__[#rctec5] AS TOTAL, Q80.__[#rctec6]  \
+        FROM __[#tab] Q80 JOIN RCTE ON Q80.__[#rctec2] = RCTE.__[#rctec1]  \
+        WHERE DEPTH < @maxdepth  \
+)   SELECT * FROM RCTE
+-- _optionalorderbyidlimitoffset
+
+
+-- ... with aggregate functions (implicit GROUP BY)
+-- TODO: write one of these
+
+-- ... with an actual GROUP BY (or two??)
+-- TODO: write one of these

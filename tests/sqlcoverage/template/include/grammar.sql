@@ -60,6 +60,11 @@
 {_sortorder |= " ASC "}
 {_sortorder |= " DESC "}
 
+{_optionallimit |= ""}
+{_optionallimit |= "LIMIT 4"}
+{_optionaloffset |= ""}
+{_optionaloffset |= "OFFSET 2"}
+
 {_math |= " + "}
 {_math |= " - "}
 {_math |= " * "}

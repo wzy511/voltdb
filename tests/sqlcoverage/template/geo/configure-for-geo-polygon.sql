@@ -44,3 +44,5 @@
 {@updatecolumn = "POLY3"}
 {@updatesource = "POLY1"}
 {@updatevalue = "_value[polygon null25]"}
+{@updatecolumn2 = "POLY2"} -- rarely used; so far, only in CTE tests
+{@maxdepth = "6"} -- maximum depth, in Recursive CTE tests

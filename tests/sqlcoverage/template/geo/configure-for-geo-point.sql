@@ -33,3 +33,5 @@
 {@updatecolumn = "PT3"}
 {@updatesource = "PT1"}
 {@updatevalue = "_value[point null20]"}
+{@updatecolumn2 = "PT2"} -- rarely used; so far, only in CTE tests
+{@maxdepth = "6"} -- maximum depth, in Recursive CTE tests

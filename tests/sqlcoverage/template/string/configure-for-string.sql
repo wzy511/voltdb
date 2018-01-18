@@ -29,3 +29,5 @@
 {@updatecolumn = "VCHAR"}
 {@updatesource = "VCHAR_INLINE"}
 {@updatevalue = "_value[string]"}
+{@updatecolumn2 = "VCHAR_INLINE_MAX"} -- rarely used; so far, only in CTE tests
+{@maxdepth = "6"} -- maximum depth, in Recursive CTE tests

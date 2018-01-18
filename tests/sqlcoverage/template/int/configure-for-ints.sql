@@ -30,3 +30,5 @@
 {@updatecolumn = "BIG"}
 {@updatesource = "ID"}
 {@updatevalue = "_value[byte]"}
+{@updatecolumn2 = "SMALL"} -- rarely used; so far, only in CTE tests
+{@maxdepth = "6"} -- maximum depth, in Recursive CTE tests

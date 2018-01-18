@@ -29,3 +29,5 @@
 {@updatecolumn = "_value[varbinary]"}
 {@updatesource = "_value[varbinary]"}
 {@updatevalue = "_value[varbinary]"}
+{@updatecolumn2 = "C"} -- rarely used; so far, only in CTE tests
+{@maxdepth = "6"} -- maximum depth, in Recursive CTE tests
