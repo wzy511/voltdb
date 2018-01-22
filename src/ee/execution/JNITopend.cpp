@@ -563,34 +563,30 @@ void JNITopend::pushExportBuffer(
         StreamBlock *block,
         bool sync) {
     jstring signatureString = m_jniEnv->NewStringUTF(signature.c_str());
+    jlong rawPtr = NULL;
+    jobject buffer = NULL;
+    int64_t uso = 0;
     if (block != NULL) {
-        jobject buffer = m_jniEnv->NewDirectByteBuffer( block->rawPtr(), block->rawLength());
+        rawPtr = reinterpret_cast<jlong>(block->rawPtr());
+        buffer = m_jniEnv->NewDirectByteBuffer( block->rawPtr(), block->rawLength());
         if (buffer == NULL) {
             m_jniEnv->ExceptionDescribe();
             throw std::exception();
         }
+        uso = block->uso();
+    }
 
-        m_jniEnv->CallStaticVoidMethod(
-                m_exportManagerClass,
-                m_pushExportBufferMID,
-                partitionId,
-                signatureString,
-                block->uso(),
-                reinterpret_cast<jlong>(block->rawPtr()),
-                buffer,
-                sync ? JNI_TRUE : JNI_FALSE);
+    m_jniEnv->CallStaticVoidMethod(
+            m_exportManagerClass,
+            m_pushExportBufferMID,
+            partitionId,
+            signatureString,
+            uso,
+            rawPtr,
+            buffer,
+            sync ? JNI_TRUE : JNI_FALSE);
+    if (buffer != NULL) {
         m_jniEnv->DeleteLocalRef(buffer);
-    } else {
-
-        m_jniEnv->CallStaticVoidMethod(
-                        m_exportManagerClass,
-                        m_pushExportBufferMID,
-                        partitionId,
-                        signatureString,
-                        static_cast<int64_t>(0),
-                        NULL,
-                        NULL,
-                        sync ? JNI_TRUE : JNI_FALSE);
     }
     m_jniEnv->DeleteLocalRef(signatureString);
     if (m_jniEnv->ExceptionCheck()) {
