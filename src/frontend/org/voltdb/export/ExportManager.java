@@ -538,11 +538,8 @@ public class ExportManager
             int partitionId,
             String signature,
             long uso,
-            long bufferPtr,
             ByteBuffer buffer,
             boolean sync) {
-        //For validating that the memory is released
-        if (bufferPtr != 0) DBBPool.registerUnsafeMemory(bufferPtr);
         ExportManager instance = instance();
         try {
             ExportGeneration generation = instance.m_generation.get();

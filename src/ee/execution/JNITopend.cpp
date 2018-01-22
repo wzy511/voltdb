@@ -563,11 +563,9 @@ void JNITopend::pushExportBuffer(
         StreamBlock *block,
         bool sync) {
     jstring signatureString = m_jniEnv->NewStringUTF(signature.c_str());
-    jlong rawPtr = NULL;
     jobject buffer = NULL;
     int64_t uso = 0;
     if (block != NULL) {
-        rawPtr = reinterpret_cast<jlong>(block->rawPtr());
         buffer = m_jniEnv->NewDirectByteBuffer( block->rawPtr(), block->rawLength());
         if (buffer == NULL) {
             m_jniEnv->ExceptionDescribe();
@@ -582,8 +580,7 @@ void JNITopend::pushExportBuffer(
             partitionId,
             signatureString,
             uso,
-            rawPtr,
-            buffer,
+            buffer,  // can be NULL
             sync ? JNI_TRUE : JNI_FALSE);
     if (buffer != NULL) {
         m_jniEnv->DeleteLocalRef(buffer);
