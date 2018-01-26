@@ -89,10 +89,15 @@
 {_somecmp |= " < "}
 {_somecmp |= " >= "}
 
-{_jointype |= " "}
-{_jointype |= " INNER "}
-{_jointype |= " LEFT "}
-{_jointype |= " RIGHT "}
+-- In some circumstances, a FULL JOIN is not supported by PostgreSQL
+{_innerjointype |= " "}
+{_innerjointype |= " INNER "}
+
+{_nonfulljointype |= "_innerjointype"}
+{_nonfulljointype |= " LEFT "}
+{_nonfulljointype |= " RIGHT "}
+
+{_jointype |= "_nonfulljointype"}
 {_jointype |= " FULL "}
 
 {_setop |= " UNION "}

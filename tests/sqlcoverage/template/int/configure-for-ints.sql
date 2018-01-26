@@ -17,6 +17,7 @@
 {@fromtables = "_table"}
 {@idcol = "ID"}
 {@insertcols = "ID, TINY, SMALL, BIG"}
+{@insertselectcols = "ID+8, TINY, SMALL, BIG"}
 -- scaling down the random values until overflow detection works in VoltDB AND HSQL
 --{@insertvals = "_id, _value[byte], _value[int16], _value[int64]"}
 {@insertvals = "_id, _value[int:-10,10], _value[byte null30], _value[byte]"}

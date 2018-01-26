@@ -18,6 +18,7 @@
 {@idcol = "ID"}
 
 {@insertcols = "ID, CASH, CREDIT, RATIO"}
+{@insertselectcols = "ID+8, CASH, CREDIT, RATIO"}
 {@insertvals = "_id, _value[decimal], _value[decimal null30], _value[float]"}
 {@onefun = "ABS"}
 {@optionalfn = "_numfun"}
