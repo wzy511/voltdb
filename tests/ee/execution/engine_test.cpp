@@ -569,12 +569,12 @@ TEST_F(ExecutionEngineTest, Execute_PlanFragmentInfo) {
 
     const voltdb::TupleSchema* res_schema = result->schema();
     voltdb::TableTuple tuple(res_schema);
-    boost::scoped_ptr<voltdb::TableIterator> iter(result->makeIterator());
-    if (!iter->hasNext()) {
+    voltdb::TableIterator iter = result->iterator();
+    if (!iter.hasNext()) {
         printf("No results!!\n");
     }
     int32_t count;
-    for (count = 0; iter->next(tuple); count += 1) {
+    for (count = 0; iter.next(tuple); count += 1) {
         /*
          * This is true because of collusion between the query
          * and the test.  The query selects two values, both
