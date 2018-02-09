@@ -159,9 +159,17 @@ void SynchronizedThreadLock::init(int32_t sitesPerHost, EngineLocals& newEngineL
             VOLT_DEBUG("Initializing memory pool for Replicated Tables on thread %d", ThreadLocalPool::getThreadPartitionId());
             assert(s_mpEngine.context == NULL);
             s_mpEngine.context = newEngineLocals.context;
+
+            delete s_mpEngine.enginePartitionId;
             s_mpEngine.enginePartitionId = new int32_t(s_mpMemoryPartitionId);
+
+            delete s_mpEngine.poolData;
             s_mpEngine.poolData = new PoolPairType(1, new PoolsByObjectSize());
+
+            delete s_mpEngine.stringData;
             s_mpEngine.stringData = new CompactingStringStorage();
+
+            delete s_mpEngine.allocated;
             s_mpEngine.allocated = new std::size_t;
         }
     }
