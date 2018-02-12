@@ -164,7 +164,9 @@ void SynchronizedThreadLock::init(int32_t sitesPerHost, EngineLocals& newEngineL
             s_mpEngine.enginePartitionId = new int32_t(s_mpMemoryPartitionId);
 
             delete s_mpEngine.poolData;
-            s_mpEngine.poolData = new PoolPairType(1, new PoolsByObjectSize());
+            PoolsByObjectSize *pools = new PoolsByObjectSize();
+            PoolPairType* refCountedPools = new PoolPairType(1, pools);
+            s_mpEngine.poolData = refCountedPools;
 
             delete s_mpEngine.stringData;
             s_mpEngine.stringData = new CompactingStringStorage();
@@ -419,6 +421,7 @@ EngineLocals SynchronizedThreadLock::getMpEngineForTest() {return s_mpEngine;}
 void SynchronizedThreadLock::resetEngineLocalsForTest() {
     s_mpEngine = EngineLocals(true);
     s_enginesByPartitionId.clear();
+    ExecutorContext::resetStateForDebug();
 }
 
 void SynchronizedThreadLock::setEngineLocalsForTest(EngineLocals mpEngine, SharedEngineLocalsType enginesByPartitionId) {

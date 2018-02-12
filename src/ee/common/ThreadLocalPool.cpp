@@ -62,9 +62,9 @@ ThreadLocalPool::ThreadLocalPool()
         pthread_setspecific( m_allocatedKey, static_cast<const void *>(new std::size_t(0)));
         pthread_setspecific( m_threadPartitionIdKey, static_cast<const void *>(new int32_t(0)));
         pthread_setspecific( m_enginePartitionIdKey, static_cast<const void *>(new int32_t(0)));
-        pthread_setspecific( m_key, static_cast<const void *>(
-                new PoolPairType(
-                        1, new PoolsByObjectSize())));
+        PoolsByObjectSize* pools = new PoolsByObjectSize();
+        PoolPairType* refCountedPools = new PoolPairType(1, pools);
+        pthread_setspecific(m_key, static_cast<const void *>(refCountedPools));
         pthread_setspecific(m_stringKey, static_cast<const void*>(new CompactingStringStorage()));
 #ifdef VOLT_DEBUG_ENABLED
         m_allocatingEngine = -1;
@@ -174,6 +174,13 @@ void ThreadLocalPool::assignThreadLocals(PoolLocals& mapping)
     pthread_setspecific(m_key, static_cast<const void *>(mapping.poolData));
     pthread_setspecific(m_stringKey, static_cast<const void*>(mapping.stringData));
     pthread_setspecific(m_enginePartitionIdKey, static_cast<const void*>(mapping.enginePartitionId));
+}
+
+void ThreadLocalPool::resetStateForDebug() {
+    pthread_setspecific(m_allocatedKey, NULL);
+    pthread_setspecific(m_key, NULL);
+    pthread_setspecific(m_stringKey, NULL);
+    pthread_setspecific(m_enginePartitionIdKey, NULL);
 }
 
 static int32_t getAllocationSizeForObject(int length)

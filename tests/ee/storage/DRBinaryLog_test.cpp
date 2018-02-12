@@ -330,6 +330,10 @@ public:
     }
 
     virtual ~DRBinaryLogTest() {
+        BOOST_FOREACH (auto& nvalue, m_cachedStringValues) {
+            nvalue.free();
+        }
+
         {
             SynchronizedThreadLock::setEngineLocalsForTest(m_engine_mpEngine, m_engine_enginesByPartitionId);
             delete m_table;
