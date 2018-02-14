@@ -424,9 +424,11 @@ void SynchronizedThreadLock::resetEngineLocalsForTest() {
     ExecutorContext::resetStateForDebug();
 }
 
-void SynchronizedThreadLock::setEngineLocalsForTest(EngineLocals mpEngine, SharedEngineLocalsType enginesByPartitionId) {
+void SynchronizedThreadLock::setEngineLocalsForTest(int32_t partitionId, EngineLocals mpEngine, SharedEngineLocalsType enginesByPartitionId) {
     s_mpEngine = mpEngine;
     s_enginesByPartitionId = enginesByPartitionId;
+    ExecutorContext::assignThreadLocals(enginesByPartitionId[partitionId]);
+    ThreadLocalPool::assignThreadLocals(enginesByPartitionId[partitionId]);
 }
 
 ExecuteWithMpMemory::ExecuteWithMpMemory() {
