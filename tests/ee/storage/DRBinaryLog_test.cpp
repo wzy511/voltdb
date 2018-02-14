@@ -701,7 +701,10 @@ public:
 
     void createUniqueIndexes() {
         createUniqueIndexes(m_table);
-        createUniqueIndexes(m_tableReplica);
+        {
+            ReplicaProcessContextSwitcher switcher;
+            createUniqueIndexes(m_tableReplica);
+        }
     }
 
     void createUniqueIndexes(PersistentTable* table) {
@@ -938,6 +941,18 @@ public:
         EXPECT_EQ(3, m_replicatedTableReplica->activeTupleCount());
         tuple = m_replicatedTableReplica->lookupTupleForDR(second_tuple);
         ASSERT_FALSE(tuple.isNullTuple());
+    }
+
+    void cleanUpTopend() {
+        ReplicaProcessContextSwitcher switcher;
+        m_topend.existingMetaRowsForDelete.reset();
+        m_topend.existingTupleRowsForDelete.reset();
+        m_topend.expectedMetaRowsForDelete.reset();
+        m_topend.expectedTupleRowsForDelete.reset();
+        m_topend.existingMetaRowsForInsert.reset();
+        m_topend.existingTupleRowsForInsert.reset();
+        m_topend.newMetaRowsForInsert.reset();
+        m_topend.newTupleRowsForInsert.reset();
     }
 
 protected:
@@ -1456,63 +1471,74 @@ TEST_F(DRBinaryLogTest, UpdateWithNullsAndUniqueIndex) {
     updateWithNullsTest();
 }
 
-///*
-// * Conflict detection test case - Insert Unique Constraint Violation
-// *
-// * | Time | DB A                          | DB B                          |
-// * |------+-------------------------------+-------------------------------|
-// * | T71  |                               | insert 99 (pk), 55555 (uk), X |
-// * |      |                               | insert 42 (pk), 34523 (uk), Y |
-// * | T72  | insert 42 (pk), 34523 (uk), X |                               |
-// *
-// * DB B reports: <DELETE no conflict>
-// * existingRow: <null>
-// * expectedRow: <null>
-// *               <INSERT constraint violation>
-// * existingRow: <42, 34523, Y>
-// * newRow:      <42, 34523, X>
-// */
-//TEST_F(DRBinaryLogTest, DetectInsertUniqueConstraintViolation) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//    ASSERT_FALSE(flush(99));
-//
-//    // write transactions on replica
-//    beginTxn(m_engineReplica, 100, 100, 99, 71);
-//    insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 99, 55555,
-//            "92384598.2342", "what", "really, why am I writing anything in these?", 3455));
-//    TableTuple existingTuple = insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 42, 34523,
-//                "7565464.2342", "yes", "no no no, writing more words to make it outline?", 1234));
-//    endTxn(m_engineReplica, true);
-//    flushButDontApply(100);
-//
-//    // write transactions on master
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    TableTuple newTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 34523,
-//            "92384598.2342", "what", "really, why am I writing anything in these?", 3455));
-//    endTxn(m_engine, true);
-//    // trigger a insert unique constraint violation conflict
-//    flushAndApply(101);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_INSERT);
-//    EXPECT_EQ(m_topend.deleteConflictType, NO_CONFLICT);
-//    ASSERT_TRUE(m_topend.existingTupleRowsForDelete.get() == NULL);
-//    ASSERT_TRUE(m_topend.expectedTupleRowsForDelete.get() == NULL);
-//
-//    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExistingTableForInsert(existingTuple);
-//
-//    // verify new table
-//    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyNewTableForInsert(newTuple);
-//
-//    // check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(2, exportStream->receivedTuples.size());
-//}
-//
+/*
+ * Conflict detection test case - Insert Unique Constraint Violation
+ *
+ * | Time | DB A                          | DB B                          |
+ * |------+-------------------------------+-------------------------------|
+ * | T71  |                               | insert 99 (pk), 55555 (uk), X |
+ * |      |                               | insert 42 (pk), 34523 (uk), Y |
+ * | T72  | insert 42 (pk), 34523 (uk), X |                               |
+ *
+ * DB B reports: <DELETE no conflict>
+ * existingRow: <null>
+ * expectedRow: <null>
+ *               <INSERT constraint violation>
+ * existingRow: <42, 34523, Y>
+ * newRow:      <42, 34523, X>
+ */
+TEST_F(DRBinaryLogTest, DetectInsertUniqueConstraintViolation)
+{
+    enableActiveActive();
+    createUniqueIndexes();
+    ASSERT_FALSE(flush(99));
+
+    // write transactions on replica
+    TableTuple existingTuple;
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 100, 100, 99, 71);
+        insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 99, 55555,
+                                                     "92384598.2342", "what",
+                                                     "really, why am I writing anything in these?", 3455));
+        existingTuple = insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 42, 34523,
+                                                                     "7565464.2342", "yes",
+                                                                     "no no no, writing more words to make it outline?",
+                                                                     1234));
+        endTxn(m_engineReplica, true);
+        flushButDontApply(100);
+    }
+
+    // write transactions on master
+    beginTxn(m_engine, 101, 101, 100, 72);
+    TableTuple newTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 34523,
+            "92384598.2342", "what", "really, why am I writing anything in these?", 3455));
+    endTxn(m_engine, true);
+
+    // trigger a insert unique constraint violation conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_INSERT);
+    EXPECT_EQ(m_topend.deleteConflictType, NO_CONFLICT);
+    ASSERT_TRUE(m_topend.existingTupleRowsForDelete.get() == NULL);
+    ASSERT_TRUE(m_topend.expectedTupleRowsForDelete.get() == NULL);
+
+    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExistingTableForInsert(existingTuple);
+
+    // verify new table
+    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyNewTableForInsert(newTuple);
+
+    // check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(2, exportStream->receivedTuples.size());
+
+    cleanUpTopend();
+}
+
 ///*
 // * Conflict detection test case - Delete Missing Tuple
 // *
