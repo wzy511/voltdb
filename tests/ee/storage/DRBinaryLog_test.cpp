@@ -695,6 +695,7 @@ public:
         temp_tuple.setNValue(3, ValueFactory::getNullStringValue());
         temp_tuple.setNValue(4, ValueFactory::getTempStringValue("whatever and ever and ever and ever"));
         temp_tuple.setNValue(5, NValue::getNullValue(VALUE_TYPE_TIMESTAMP));
+        temp_tuple.setNValue(6, ValueFactory::getTempBinaryValue("DEADBEEF"));
         return temp_tuple;
     }
 
@@ -1446,15 +1447,15 @@ TEST_F(DRBinaryLogTest, PartialTxnRollback) {
     ASSERT_FALSE(tuple.isNullTuple());
 }
 
-//TEST_F(DRBinaryLogTest, UpdateWithNulls) {
-//    updateWithNullsTest();
-//}
-//
-//TEST_F(DRBinaryLogTest, UpdateWithNullsAndUniqueIndex) {
-//    createIndexes();
-//    updateWithNullsTest();
-//}
-//
+TEST_F(DRBinaryLogTest, UpdateWithNulls) {
+    updateWithNullsTest();
+}
+
+TEST_F(DRBinaryLogTest, UpdateWithNullsAndUniqueIndex) {
+    createIndexes();
+    updateWithNullsTest();
+}
+
 ///*
 // * Conflict detection test case - Insert Unique Constraint Violation
 // *
