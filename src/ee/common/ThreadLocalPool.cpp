@@ -183,6 +183,9 @@ void ThreadLocalPool::resetStateForDebug() {
     pthread_setspecific(m_key, NULL);
     pthread_setspecific(m_stringKey, NULL);
     pthread_setspecific(m_enginePartitionIdKey, NULL);
+
+    delete static_cast<int32_t*>(pthread_getspecific(m_threadPartitionIdKey));
+    pthread_setspecific(m_threadPartitionIdKey, NULL);
 }
 
 static int32_t getAllocationSizeForObject(int length)

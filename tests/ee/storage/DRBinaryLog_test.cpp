@@ -249,13 +249,13 @@ public:
         m_undoToken(0),
         m_spHandleReplica(0)
     {
-        m_engine = new MockVoltDBEngine(CLUSTER_ID, &m_topend, &m_pool, &m_drStream, &m_drReplicatedStream);
+        m_engine = new MockVoltDBEngine(CLUSTER_ID, &m_topend, &m_enginesPool, &m_drStream, &m_drReplicatedStream);
         s_clusterMap[CLUSTER_ID] = ClusterCtx(m_engine,
                                               SynchronizedThreadLock::getMpEngineForTest(),
                                               SynchronizedThreadLock::s_enginesByPartitionId);
         SynchronizedThreadLock::resetEngineLocalsForTest();
 
-        m_engineReplica = new MockVoltDBEngine(CLUSTER_ID_REPLICA, &m_topend, &m_pool, &m_drStreamReplica, &m_drReplicatedStreamReplica);
+        m_engineReplica = new MockVoltDBEngine(CLUSTER_ID_REPLICA, &m_topend, &m_enginesPool, &m_drStreamReplica, &m_drReplicatedStreamReplica);
         s_clusterMap[CLUSTER_ID_REPLICA] = ClusterCtx(m_engineReplica,
                                                       SynchronizedThreadLock::getMpEngineForTest(),
                                                       SynchronizedThreadLock::s_enginesByPartitionId);
@@ -516,7 +516,7 @@ public:
         TableTuple new_tuple = table->tempTuple();
         new_tuple.copy(tuple_to_update);
         new_tuple.setNValue(0, ValueFactory::getTinyIntValue(new_index_value));
-        new_tuple.setNValue(3, ValueFactory::getTempStringValue(new_nonindex_value));
+        new_tuple.setNValue(3, ValueFactory::getStringValue(new_nonindex_value, &m_longLivedPool));
         table->updateTuple(tuple_to_update, new_tuple);
         return table->lookupTupleForDR(new_tuple);
     }
@@ -541,16 +541,17 @@ public:
         temp_tuple.setNValue(0, ValueFactory::getTinyIntValue(tinyint));
         temp_tuple.setNValue(1, ValueFactory::getBigIntValue(bigint));
         temp_tuple.setNValue(2, ValueFactory::getDecimalValueFromString(decimal));
-        temp_tuple.setNValue(3, ValueFactory::getTempStringValue(short_varchar));
-        temp_tuple.setNValue(4, ValueFactory::getTempStringValue(long_varchar));
+        temp_tuple.setNValue(3, ValueFactory::getStringValue(short_varchar, &m_longLivedPool));
+        temp_tuple.setNValue(4, ValueFactory::getStringValue(long_varchar, &m_longLivedPool));
         temp_tuple.setNValue(5, ValueFactory::getTimestampValue(timestamp));
-        temp_tuple.setNValue(6, ValueFactory::getTempBinaryValue("74686973206973206120726174686572206C6F6E6720737472696E67206F6620746578742074686174206973207573656420746F206361757365206E76616C756520746F20757365206F75746C696E652073746F7261676520666F722074686520756E6465726C79696E6720646174612E2049742073686F756C64206265206C6F6E676572207468616E2036342062797465732E"));
+        temp_tuple.setNValue(6, ValueFactory::getBinaryValue("74686973206973206120726174686572206C6F6E6720737472696E67206F6620746578742074686174206973207573656420746F206361757365206E76616C756520746F20757365206F75746C696E652073746F7261676520666F722074686520756E6465726C79696E6720646174612E2049742073686F756C64206265206C6F6E676572207468616E2036342062797465732E",
+                                                                 &m_longLivedPool));
         return temp_tuple;
     }
 
     void deepCopy(TableTuple *dst, const TableTuple &src) {
         for (int i = 0; i < dst->columnCount(); ++i) {
-            dst->setNValueAllocateForObjectCopies(i, src.getNValue(i));
+            dst->setNValueAllocateForObjectCopies(i, src.getNValue(i), &m_longLivedPool);
         }
 
         for (int i = 0; i < dst->getSchema()->hiddenColumnCount(); ++i) {
@@ -618,7 +619,7 @@ public:
             m_drStream.m_enabled = false;
             m_drReplicatedStream.m_enabled = false;
             DRStreamData data = getDRStreamData();
-            m_sinkWrapper.apply(&data.first[data.second], tables, &m_pool, m_engineReplica, 1, uniqueId);
+            m_sinkWrapper.apply(&data.first[data.second], tables, &m_enginesPool, m_engineReplica, 1, uniqueId);
             m_drStream.m_enabled = true;
             m_drReplicatedStream.m_enabled = true;
         }
@@ -685,7 +686,7 @@ public:
         temp_tuple.setNValue(0, (indexFriendly ? ValueFactory::getTinyIntValue(99) : NValue::getNullValue(VALUE_TYPE_TINYINT)));
         temp_tuple.setNValue(1, ValueFactory::getBigIntValue(489735));
         temp_tuple.setNValue(2, NValue::getNullValue(VALUE_TYPE_DECIMAL));
-        temp_tuple.setNValue(3, ValueFactory::getTempStringValue("whatever"));
+        temp_tuple.setNValue(3, ValueFactory::getStringValue("whatever", &m_longLivedPool));
         temp_tuple.setNValue(4, ValueFactory::getNullStringValue());
         temp_tuple.setNValue(5, ValueFactory::getTimestampValue(3495));
         return temp_tuple;
@@ -697,9 +698,9 @@ public:
         temp_tuple.setNValue(1, (indexFriendly ? ValueFactory::getBigIntValue(31241) : NValue::getNullValue(VALUE_TYPE_BIGINT)));
         temp_tuple.setNValue(2, ValueFactory::getDecimalValueFromString("234234.243"));
         temp_tuple.setNValue(3, ValueFactory::getNullStringValue());
-        temp_tuple.setNValue(4, ValueFactory::getTempStringValue("whatever and ever and ever and ever"));
+        temp_tuple.setNValue(4, ValueFactory::getStringValue("whatever and ever and ever and ever", &m_longLivedPool));
         temp_tuple.setNValue(5, NValue::getNullValue(VALUE_TYPE_TIMESTAMP));
-        temp_tuple.setNValue(6, ValueFactory::getTempBinaryValue("DEADBEEF"));
+        temp_tuple.setNValue(6, ValueFactory::getBinaryValue("DEADBEEF", &m_longLivedPool));
         return temp_tuple;
     }
 
@@ -995,7 +996,8 @@ protected:
     int64_t m_spHandleReplica;
 
     DummyTopend m_topend;
-    Pool m_pool;
+    Pool m_enginesPool;   // purges whenever transaction commits or rolls back
+    Pool m_longLivedPool; // purges at end of test
     BinaryLogSinkWrapper m_sinkWrapper;
     MockVoltDBEngine* m_engine;
     MockVoltDBEngine* m_engineReplica;
