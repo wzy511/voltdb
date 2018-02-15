@@ -253,11 +253,9 @@ public:
         s_clusterMap[CLUSTER_ID] = ClusterCtx(m_engine,
                                               SynchronizedThreadLock::getMpEngineForTest(),
                                               SynchronizedThreadLock::s_enginesByPartitionId);
-        std::cerr << " *** *** MP site string storage: " << SynchronizedThreadLock::getMpEngineForTest().stringData << std::endl;
         SynchronizedThreadLock::resetEngineLocalsForTest();
 
         m_engineReplica = new MockVoltDBEngine(CLUSTER_ID_REPLICA, &m_topend, &m_pool, &m_drStreamReplica, &m_drReplicatedStreamReplica);
-        std::cerr << " *** *** MP site string storage: " << SynchronizedThreadLock::getMpEngineForTest().stringData << std::endl;
         s_clusterMap[CLUSTER_ID_REPLICA] = ClusterCtx(m_engineReplica,
                                                       SynchronizedThreadLock::getMpEngineForTest(),
                                                       SynchronizedThreadLock::s_enginesByPartitionId);
@@ -416,6 +414,8 @@ public:
     }
 
     virtual ~DRBinaryLogTest() {
+        cleanUpTopend();
+
         {
             delete m_table;
             SynchronizedThreadLock::lockReplicatedResource();
@@ -547,11 +547,14 @@ public:
         return temp_tuple;
     }
 
-    boost::shared_array<char> deepCopy(TableTuple &target, TableTuple &copy, boost::shared_array<char> data) {
-        data.reset(new char[target.tupleLength()]());
-        copy.move(data.get());
-        copy.copyForPersistentInsert(target);
-        return data;
+    void deepCopy(TableTuple *dst, const TableTuple &src) {
+        for (int i = 0; i < dst->columnCount(); ++i) {
+            dst->setNValueAllocateForObjectCopies(i, src.getNValue(i));
+        }
+
+        for (int i = 0; i < dst->getSchema()->hiddenColumnCount(); ++i) {
+            dst->setHiddenNValue(i, src.getHiddenNValue(i));
+        }
     }
 
     bool flush(int64_t lastCommittedSpHandle) {
@@ -1003,18 +1006,6 @@ protected:
     char exportTableHandle[20];
 };
 
-class StackCleaner {
-public:
-    StackCleaner(TableTuple tuple) : m_tuple(tuple) {}
-
-    ~StackCleaner() {
-        m_tuple.freeObjectColumns();
-    }
-
-private:
-    TableTuple m_tuple;
-};
-
 TEST_F(DRBinaryLogTest, VerifyHiddenColumns) {
     ASSERT_FALSE(flush(98));
 
@@ -1102,10 +1093,9 @@ TEST_F(DRBinaryLogTest, PartitionedTableNoRollbacks) {
     second_tuple = insertTuple(m_table, prepareTempTuple(m_table, 7, 234, "23452436.54", "what", "this is starting to get silly", 2342));
     endTxn(m_engine, true);
 
-    TableTuple existedTuple(m_table->schema());
-    boost::shared_array<char> existedData;
-    existedData = deepCopy(second_tuple, existedTuple, existedData);
-    StackCleaner secondExistingTupleCleaner(existedTuple);
+    StandAloneTupleStorage existedTupleStorage(m_table->schema());
+    TableTuple existedTuple = existedTupleStorage.tuple();
+    deepCopy(&existedTuple, second_tuple);
 
     // delete the second row inserted in the last write
     beginTxn(m_engine, 112, 102, 101, 73);
@@ -1535,837 +1525,853 @@ TEST_F(DRBinaryLogTest, DetectInsertUniqueConstraintViolation)
     // check export
     MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
     EXPECT_EQ(2, exportStream->receivedTuples.size());
-
-    cleanUpTopend();
 }
 
-///*
-// * Conflict detection test case - Delete Missing Tuple
-// *
-// * | Time | DB A                          | DB B                          |
-// * |------+-------------------------------+-------------------------------|
-// * | T70  | insert 42 (pk), 55555 (uk), X | insert 42 (pk), 55555 (uk), X |
-// * | T71  |                               | delete 42 (pk), 55555 (uk), X |
-// * | T72  | delete 42 (pk), 55555 (uk), X |                               |
-// *
-// * DB B reports: <DELETE missing row>
-// * existingRow: <null>
-// * expectedRow: <42, 5555, X>
-// * deletedRow:  <>
-// *               <INSERT no conflict>
-// * existingRow: <null>
-// * newRow:      <null>
-// */
-//TEST_F(DRBinaryLogTest, DetectDeleteMissingTuple) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//
-//    // insert rows on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of m_table will be rewritten later
-//    TableTuple expectedTuple (m_table->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner cleaner(expectedTuple);
-//    endTxn(m_engine, true);
-//    flushAndApply(99, false);
-//
-//    // delete row on replica
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    deleteTuple(m_tableReplica, tempExpectedTuple);
-//    endTxn(m_engine, true);
-//    flushButDontApply(100);
-//
-//    // delete the same row on master then wait to trigger conflict on replica
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    deleteTuple(m_table, tempExpectedTuple);
-//    endTxn(m_engine, true);
-//    // trigger a delete missing tuple conflict
-//    flushAndApply(101, false);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_DELETE);
-//
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISSING);
-//    // verify existing table
-//    EXPECT_EQ(0, m_topend.existingTupleRowsForDelete->activeTupleCount());
-//    // verfiy expected table
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple = */verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
-//    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
-//    ASSERT_TRUE(m_topend.newTupleRowsForInsert.get() == NULL);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(2, exportStream->receivedTuples.size());
-//}
-//
-///*
-// * Conflict detection test case - Delete Timestamp Mismatch
-// *
-// * | Time | DB A                          | DB B                                    |
-// * |------+-------------------------------+-----------------------------------------|
-// * | T70  | insert 42 (pk), 55555 (uk), X | insert 42 (pk), 55555 (uk), X           |
-// * | T71  |                               | update <42, 55555, X> to <42, 1234, X>  |
-// * | T72  | delete 42 (pk), 55555 (uk), X |                                         |
-// *
-// * DB B reports: <DELETE timestamp mismatch>
-// * existingRow: <42, 1234, X>
-// * expectedRow: <42, 5555, X>
-// * deletedRow:  <>
-// *               <INSERT no conflict>
-// * existingRow: <null>
-// * newRow:      <null>
-// */
-//TEST_F(DRBinaryLogTest, DetectDeleteTimestampMismatch) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//
-//    // insert one row on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of relica table will be rewritten later
-//    TableTuple expectedTuple (m_table->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner expectedTupleCleaner(expectedTuple);
-//    endTxn(m_engine, true);
-//    flushAndApply(99);
-//
-//    // insert a few rows and update one row on replica
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    TableTuple tempExistingTuple = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42/*causes a constraint violation*/, 1234);
-//    // do a deep copy because temp tuple of relica table will be overwriten when applying binary log
-//    TableTuple existingTuple(m_tableReplica->schema());
-//    boost::shared_array<char> data;
-//    data = deepCopy(tempExistingTuple, existingTuple, data);
-//    StackCleaner existingTupleCleaner(existingTuple);
-//    endTxn(m_engine, true);
-//    flushButDontApply(100);
-//
-//    // delete the row on master then wait to trigger conflict on replica
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    deleteTuple(m_table, tempExpectedTuple);
-//    endTxn(m_engine, true);
-//    // trigger a delete timestamp mismatch conflict
-//    flushAndApply(101, false);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_DELETE);
-//
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTuple, true);
-//    // verify expected table
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
-//    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
-//    ASSERT_TRUE(m_topend.newTupleRowsForInsert.get() == NULL);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(3, exportStream->receivedTuples.size());
-//}
-//
-///*
-// * Conflict detection test case - Update Unique Constraint Violation
-// *
-// * | Time | DB A                                    | DB B                           |
-// * |------+-----------------------------------------+--------------------------------|
-// * | T70  | insert 24 (pk), 2321 (uk), X            | insert 24 (pk), 2321 (uk), X   |
-// * | T71  |                                         | insert 42 (pk), 55555 (uk), Y  |
-// * |      |                                         | insert 123 (pk), 33333 (uk), Z |
-// * | T72  | update <24, 2321, X> to <12, 33333, X> |                                |
-// *
-// * DB B reports: <DELETE no conflict>
-// * existingRow: <null>
-// * expectedRow: <24, 2321, X>
-// *               <INSERT constraint violation>
-// * existingRow: <123, 33333, Z>
-// * newRow:      <12, 33333, X>
-// */
-//TEST_F(DRBinaryLogTest, DetectUpdateUniqueConstraintViolation) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//    ASSERT_FALSE(flush(98));
-//
-//    // insert row on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
-//    // do a deep copy because temp tuple of relica table will be rewritten later
-//    TableTuple expectedTuple (m_tableReplica->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner expectedTupleCleaner(expectedTuple);
-//
-//    insertTuple(m_table, prepareTempTuple(m_table, 111, 11111, "11111.1111", "second", "this is starting to get even sillier", 2222));
-//    insertTuple(m_table, prepareTempTuple(m_table, 65, 22222, "22222.2222", "third", "this is starting to get even sillier", 2222));
-//    endTxn(m_engine, true);
-//    flushAndApply(99, false);
-//
-//    // insert rows on replica side
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//
-//    TableTuple tempExistingTuple = insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 123, 33333, "122308345.34583", "another thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
-//    TableTuple existingTuple (m_tableReplica->schema());
-//    boost::shared_array<char> existingData;
-//    existingData = deepCopy(tempExistingTuple, existingTuple, existingData);
-//    StackCleaner existingTupleCleaner(existingTuple);
-//    endTxn(m_engine, true);
-//    flushButDontApply(100);
-//
-//    // update row on master to create conflict
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    TableTuple newTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 12, 33333/*causes a constraint violation*/);
-//    endTxn(m_engine, true);
-//
-//    // trigger a update unique constraint violation conflict
-//    flushAndApply(101);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
-//
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, NO_CONFLICT);
-//    ASSERT_TRUE(m_topend.existingTupleRowsForDelete.get() == NULL);
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExistingTableForInsert(existingTuple);
-//    // verify new table
-//    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyNewTableForInsert(newTuple);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(3, exportStream->receivedTuples.size());
-//}
-//
-///*
-// * Conflict detection test case - Update Missing Tuple
-// *
-// * | Time | DB A                                    | DB B                                     |
-// * |------+-----------------------------------------+------------------------------------------|
-// * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
-// * | T71  |                                         | update <42, 55555, X> to <35, 12345, X>  |
-// * | T72  | update <42, 55555, X> to <42, 54321, X> |                                          |
-// *
-// * DB B reports: <DELETE missing row>
-// * existingRow: <null>
-// * expectedRow: <42, 55555, X>
-// *               <INSERT no conflict>
-// * existingRow: <null>
-// * newRow:      <42, 54321, X>
-// */
-//TEST_F(DRBinaryLogTest, DetectUpdateMissingTuple) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//
-//    // insert rows on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple expectedTuple (m_table->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner expectedTupleCleaner(expectedTuple);
-//    endTxn(m_engine, true);
-//    flushAndApply(99);
-//
-//    // update one row on replica
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 35, 12345);
-//    endTxn(m_engine, true);
-//    flushButDontApply(100);
-//
-//    // update the same row on master then wait to trigger conflict on replica
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    TableTuple tempNewTuple = updateTupleFirstAndSecondColumn(m_table, expectedTuple, 42, 54321);
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple newTuple (m_table->schema());
-//    boost::shared_array<char> newData;
-//    newData = deepCopy(tempNewTuple, newTuple, newData);
-//    StackCleaner newTupleCleaner(newTuple);
-//    endTxn(m_engine, true);
-//    // trigger a update missing tuple conflict
-//    flushAndApply(101);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
-//
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISSING);
-//    // verify existing table
-//    EXPECT_EQ(0, m_topend.existingTupleRowsForDelete->activeTupleCount());
-//    // verify expected table
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
-//    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
-//    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyNewTableForInsert(newTuple);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(2, exportStream->receivedTuples.size());
-//}
-//
-//
-///*
-// * Conflict detection test case - Update missing tuple and new row triggers constraint
-// *
-// * | Time | DB A                                    | DB B                                     |
-// * |------+-----------------------------------------+------------------------------------------|
-// * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
-// * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
-// * |      | insert 72 (pk), 345 (uk), Z             | insert 72 (pk), 345 (uk), Z              |
-// * | T71  |                                         | delete <42, 55555, X>                    |
-// * |      |                                         | insert 36 (pk), 12345 (uk), X            |
-// * | T72  | update <42, 55555, X> to <42, 12345, X> |                                          |
-// *
-// * DB B reports: <DELETE missing row>
-// * existingRow: <null>
-// * expectedRow: <42, 55555, X>
-// *               <INSERT constraint violation>
-// * existingRow: <36, 12345, X>
-// * newRow:      <42, 12345, X>
-// */
-//TEST_F(DRBinaryLogTest, DetectUpdateMissingTupleAndNewRowConstraint) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//
-//    // insert rows on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple expectedTuple (m_table->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner expectedTupleCleaner(expectedTuple);
-//    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
-//    insertTuple(m_table, prepareTempTuple(m_table, 72, 345, "4256.345", "something", "more tuple data, really not the same", 1812));
-//    endTxn(m_engine, true);
-//    flushAndApply(99);
-//
-//    // update one row on replica
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    deleteTuple(m_tableReplica, tempExpectedTuple);
-//    TableTuple tempExistingTuple = insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 36, 12345, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
-//    TableTuple existingTuple (m_tableReplica->schema());
-//    boost::shared_array<char> existingData;
-//    existingData = deepCopy(tempExistingTuple, existingTuple, existingData);
-//    StackCleaner existingTupleCleaner(existingTuple);
-//    endTxn(m_engine, true);
-//    flushButDontApply(100);
-//
-//    // update the same row on master then wait to trigger conflict on replica
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    TableTuple newTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 12345/*causes a constraint violation*/);
-//    endTxn(m_engine, true);
-//    // trigger a update missing tuple conflict
-//    flushAndApply(101);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
-//
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISSING);
-//    // verify existing table
-//    EXPECT_EQ(0, m_topend.existingTupleRowsForDelete->activeTupleCount());
-//    // verify expected table
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyExistingTableForInsert(existingTuple);
-//    // verify new table
-//    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple3 = */verifyNewTableForInsert(newTuple);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(3, exportStream->receivedTuples.size());
-//}
-//
-///*
-// * Conflict detection test case - Update Timestamp Mismatch
-// *
-// * | Time | DB A                                    | DB B                                     |
-// * |------+-----------------------------------------+------------------------------------------|
-// * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
-// * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
-// * |      | insert 72 (pk), 345 (uk), Z             | insert 72 (pk), 345 (uk), Z              |
-// * | T71  |                                         | update <42, 55555, X> to <42, 12345, X>  |
-// * | T72  | update <42, 55555, X> to <42, 54321, X> |                                          |
-// *
-// * DB B reports: <DELETE timestamp mismatch>
-// * existingRow: <42, 12345, X>
-// * expectedRow: <42, 55555, X>
-// *               <INSERT no conflict>
-// * existingRow: <null>
-// * newRow:      <42, 54321, X>
-// */
-//TEST_F(DRBinaryLogTest, DetectUpdateTimestampMismatch) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//
-//    // insert one row on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple expectedTuple (m_table->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner expectedTupleCleaner(expectedTuple);
-//    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
-//    insertTuple(m_table, prepareTempTuple(m_table, 72, 345, "4256.345", "something", "more tuple data, really not the same", 1812));
-//    endTxn(m_engine, true);
-//    flushAndApply(99);
-//
-//    // update one row on replica
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    TableTuple tempExistingTuple = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42, 12345);
-//    // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
-//    TableTuple existingTuple (m_tableReplica->schema());
-//    boost::shared_array<char> existingData;
-//    existingData = deepCopy(tempExistingTuple, existingTuple, existingData);
-//    StackCleaner existingTupleCleaner(existingTuple);
-//    endTxn(m_engine, true);
-//    flushButDontApply(100);
-//
-//    // update the same row on master then wait to trigger conflict on replica
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    TableTuple tempNewTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 54321);
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple newTuple (m_table->schema());
-//    boost::shared_array<char> newData;
-//    newData = deepCopy(tempNewTuple, newTuple, newData);
-//    StackCleaner newTupleCleaner(newTuple);
-//    endTxn(m_engine, true);
-//    // trigger a update timestamp mismatch conflict
-//    flushAndApply(101);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
-//
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTuple, true);
-//    // verify expected table
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
-//    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
-//    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple3 = */verifyNewTableForInsert(newTuple);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(3, exportStream->receivedTuples.size());
-//}
-//
-///*
-// * Conflict detection test case - Update Timestamp Mismatch Rejected
-// *
-// * | Time | DB A                                    | DB B                                     |
-// * |------+-----------------------------------------+------------------------------------------|
-// * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
-// * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
-// * |      | insert 72 (pk), 345 (uk), Z             | insert 72 (pk), 345 (uk), Z              |
-// * | T71  | update <42, 55555, X> to <42, 12345, X> |                                          |
-// * | T72  |                                         | update <42, 55555, X> to <42, 54321, X>  |
-// *
-// * DB B reports: <DELETE timestamp mismatch>
-// * existingRow: <42, 54321, X>
-// * expectedRow: <42, 55555, X>
-// *               <INSERT no conflict>
-// * existingRow: <null>
-// * newRow:      <42, 12345, X>
-// */
-//TEST_F(DRBinaryLogTest, DetectUpdateTimestampMismatchRejected) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//
-//    // insert one row on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple expectedTuple (m_table->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner expectedTupleCleaner(expectedTuple);
-//    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
-//    insertTuple(m_table, prepareTempTuple(m_table, 72, 345, "4256.345", "something", "more tuple data, really not the same", 1812));
-//    endTxn(m_engine, true);
-//    flushAndApply(99);
-//
-//    // update one row on replica
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    TableTuple tempNewTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 12345);
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple newTuple (m_table->schema());
-//    boost::shared_array<char> newData;
-//    newData = deepCopy(tempNewTuple, newTuple, newData);
-//    StackCleaner newTupleCleaner(newTuple);
-//    endTxn(m_engine, true);
-//    flush(100);
-//
-//    // update the same row on master then wait to trigger conflict on replica
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    TableTuple tempExistingTuple = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42, 54321);
-//    // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
-//    TableTuple existingTuple (m_tableReplica->schema());
-//    boost::shared_array<char> existingData;
-//    existingData = deepCopy(tempExistingTuple, existingTuple, existingData);
-//    StackCleaner existingTupleCleaner(existingTuple);
-//    endTxn(m_engine, true);
-//    // trigger a update timestamp mismatch conflict
-//    flushAndApply(101);
-//
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
-//
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTuple, false);
-//    // verify expected table
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
-//    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
-//    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple3 = */verifyNewTableForInsert(newTuple);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(3, exportStream->receivedTuples.size());
-//}
-//
-///**
-// * Conflict detection test case - Update timstamp mismatch and new row triggers unique
-// * constraint violation.
-// *
-// * | Time | DB A                                    | DB B                                     |
-// * |------+-----------------------------------------+------------------------------------------|
-// * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
-// * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
-// * | T71  |                                         | update <42, 55555, X> to <42, 12345, X>  |
-// * |      |                                         | insert 72 (pk), 345 (uk), Z              |
-// * | T72  | update <42, 55555, X> to <42, 345, X> |                                          |
-// *
-// * DB B reports: <DELETE timestamp mismatch>
-// * existingRow: <42, 12345, X>
-// * expectedRow: <42, 55555, X>
-// *               <INSERT constraint violation>
-// * existingRow: <72, 345, Z>
-// * newRow:      <42, 345, X>
-// */
-//TEST_F(DRBinaryLogTest, DetectUpdateTimestampMismatchAndNewRowConstraint) {
-//    enableActiveActive();
-//    createUniqueIndexes();
-//
-//    // insert one row on both side
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
-//    // do a deep copy because temp tuple of table will be overwritten later
-//    TableTuple expectedTuple (m_table->schema());
-//    boost::shared_array<char> expectedData;
-//    expectedData = deepCopy(tempExpectedTuple, expectedTuple, expectedData);
-//    StackCleaner expectedTupleCleaner(expectedTuple);
-//    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
-//    endTxn(m_engine, true);
-//    flushAndApply(99);
-//
-//    // update one row on replica
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    TableTuple tempExistingTupleFirst = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42, 12345);
-//    // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
-//    TableTuple existingTupleFirst (m_tableReplica->schema());
-//    boost::shared_array<char> existingDataFirst;
-//    existingDataFirst = deepCopy(tempExistingTupleFirst, existingTupleFirst, existingDataFirst);
-//    StackCleaner firstExistingTupleCleaner(existingTupleFirst);
-//    TableTuple tempExistingTupleSecond = insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 72, 345, "4256.345", "something", "more tuple data, really not the same", 1812));
-//    // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
-//    TableTuple existingTupleSecond (m_tableReplica->schema());
-//    boost::shared_array<char> existingDataSecond;
-//    existingDataSecond = deepCopy(tempExistingTupleSecond, existingTupleSecond, existingDataSecond);
-//    StackCleaner secondExistingTupleCleaner(existingTupleSecond);
-//    endTxn(m_engine, true);
-//    flushButDontApply(100);
-//
-//    // update the same row on master then wait to trigger conflict on replica
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    TableTuple newTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 345/*cause a constraint violation*/);
-//    endTxn(m_engine, true);
-//    // trigger a update timestamp mismatch conflict
-//    flushAndApply(101);
-//
-//    EXPECT_EQ(2, m_table->activeTupleCount());
-//    EXPECT_EQ(3, m_tableReplica->activeTupleCount());
-//    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
-//    // 1. check delete conflict part
-//    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTupleFirst, true);
-//    // verify expected table
-//    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
-//    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
-//
-//    // 2. check insert conflict part
-//    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
-//    // verify existing table
-//    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple3 = */verifyExistingTableForInsert(existingTupleSecond);
-//    // verify new table
-//    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
-//    /*TableTuple exportTuple4 = */verifyNewTableForInsert(newTuple);
-//
-//    // 3. check export
-//    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
-//    EXPECT_EQ(4, exportStream->receivedTuples.size());
-//}
-//
-//TEST_F(DRBinaryLogTest, InsertOverBufferLimit) {
-//    createIndexes();
-//    const int total = 400;
-//    int spHandle = 1;
-//
-//    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//    try {
-//        for (int i = 1; i <= total; i++) {
-//            insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//        }
-//    } catch (SerializableEEException& e) {
-//        endTxn(m_engine, false);
-//        spHandle++;
-//
-//        for (int i = 1; i <= total; i++, spHandle++) {
-//            beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//            insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//            endTxn(m_engine, true);
-//        }
-//
-//        return;
-//    }
-//
-//    ASSERT_TRUE(false);
-//}
-//
-//TEST_F(DRBinaryLogTest, UpdateOverBufferLimit) {
-//    createIndexes();
-//    const int total = 150;
-//    long spHandle = 1;
-//
-//    for (int i = 0; i < total; i++, spHandle++) {
-//        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//        endTxn(m_engine, true);
-//    }
-//
-//    flushAndApply(spHandle-1);
-//
-//    // Update all tuples
-//    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//    spHandle++;
-//    try {
-//        // Update all rows to new values and update them back to the original
-//        // values. It would overflow the DR buffer limit and cause the txn to
-//        // roll back.
-//        for (int i = 0; i < total; i++) {
-//            TableTuple newTuple = prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i);
-//            TableTuple oldTuple = m_table->lookupTupleByValues(newTuple);
-//            newTuple.setNValue(1, ValueFactory::getBigIntValue(i+total));
-//            updateTuple(m_table, oldTuple, newTuple);
-//        }
-//        for (int i = 0; i < total; i++) {
-//            TableTuple newTuple = prepareTempTuple(m_table, 42, i+total, "349508345.34583", "a thing", "a totally different thing altogether", i);
-//            TableTuple oldTuple = m_table->lookupTupleByValues(newTuple);
-//            newTuple.setNValue(1, ValueFactory::getBigIntValue(i));
-//            updateTuple(m_table, oldTuple, newTuple);
-//        }
-//    } catch (SerializableEEException& e) {
-//        endTxn(m_engine, false);
-//
-//        // Make sure all changes rolled back
-//        for (int i = 0; i < total; i++) {
-//            TableTuple tuple = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//            ASSERT_FALSE(tuple.isNullTuple());
-//
-//            TableTuple tuple2 = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i+total, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//            ASSERT_TRUE(tuple2.isNullTuple());
-//        }
-//
-//        return;
-//    }
-//    ASSERT_TRUE(false);
-//}
-//
-//TEST_F(DRBinaryLogTest, DeleteOverBufferLimit) {
-//    createIndexes();
-//    const int total = 2000;
-//    int spHandle = 1;
-//
-//    for (int i = 1; i <= total; i++, spHandle++) {
-//        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//        endTxn(m_engine, true);
-//    }
-//
-//    flushAndApply(spHandle - 1);
-//
-//    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//    try {
-//        // Delete all rows. It would overflow the DR buffer limit and cause the
-//        // txn to roll back.
-//        for (int i = 1; i <= total; i++) {
-//            TableTuple tuple = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//            deleteTuple(m_table, tuple);
-//        }
-//    } catch (SerializableEEException& e) {
-//        endTxn(m_engine, false);
-//        spHandle++;
-//
-//        // Make sure all changes rolled back, try to delete each tuple in single
-//        // txn to make sure indexes are also correct
-//        for (int i = 1; i <= total; i++, spHandle++) {
-//            beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//            TableTuple tuple = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//            ASSERT_FALSE(tuple.isNullTuple());
-//
-//            deleteTuple(m_table, tuple);
-//            endTxn(m_engine, true);
-//        }
-//
-//        return;
-//    }
-//    ASSERT_TRUE(false);
-//}
-//
-//// This test doesn't run in the memcheck build because the tuple block can only
-//// hold one tuple at a time, so it will never trigger the optimized truncation
-//// path. The normal truncation path will fail because we don't have a catalog
-//// loaded.
-//TEST_F(DRBinaryLogTest, TruncateTable) {
-//#ifndef MEMCHECK
-//    createIndexes();
-//    const int total = 150;
-//    int spHandle = 1;
-//
-//    for (int i = 1; i <= total; i++, spHandle++) {
-//        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//        endTxn(m_engine, true);
-//    }
-//
-//    flushAndApply(spHandle - 1);
-//    EXPECT_EQ(total, m_table->activeTupleCount());
-//    EXPECT_EQ(total, m_tableReplica->activeTupleCount());
-//
-//    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//    m_table->truncateTable(m_engine);
-//    endTxn(m_engine, true);
-//
-//    flushAndApply(spHandle);
-//    EXPECT_EQ(0, m_table->activeTupleCount());
-//    EXPECT_EQ(0, m_tableReplica->activeTupleCount());
-//#endif
-//}
-//
-//TEST_F(DRBinaryLogTest, IgnoreTableRowLimit) {
-//    m_tableReplica->setTupleLimit(100);
-//
-//    const int total = 101;
-//    int spHandle = 1;
-//
-//    for (int i = 1; i <= total; i++, spHandle++) {
-//        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
-//        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
-//        endTxn(m_engine, true);
-//    }
-//
-//    flushAndApply(spHandle - 1);
-//
-//    EXPECT_EQ(101, m_tableReplica->activeTupleCount());
-//}
-//
-//TEST_F(DRBinaryLogTest, MultiPartNoDataChange) {
-//    beginTxn(m_engine, 98, 98, 97, 69);
-//    endTxn(m_engine, true);
-//    ASSERT_FALSE(flush(98));
-//    ASSERT_EQ(0, m_topend.blocks.size());
-//
-//    s_multiPartitionFlag = true;
-//
-//    beginTxn(m_engine, 99, 99, 98, 70);
-//    endTxn(m_engine, true);
-//    ASSERT_TRUE(flush(99));
-//
-//    EXPECT_EQ(0, m_table->activeTupleCount());
-//    EXPECT_EQ(0, m_tableReplica->activeTupleCount());
-//    ASSERT_EQ(2, m_topend.blocks.size());
-//
-//    std::unique_ptr<CopySerializeInputLE> taskInfo(getDRTaskInfo());
-//    taskInfo->readByte(); // DR version
-//    DRRecordType type = static_cast<DRRecordType>(taskInfo->readByte());
-//    ASSERT_EQ(DR_RECORD_BEGIN_TXN, type);
-//    taskInfo->readLong(); // uniqueId
-//    taskInfo->readLong(); // sequenceNumber
-//    DRTxnPartitionHashFlag hashFlag =
-//            static_cast<DRTxnPartitionHashFlag>(taskInfo->readByte()); // hashFlag
-//    ASSERT_EQ(TXN_PAR_HASH_PLACEHOLDER, hashFlag);
-//    taskInfo->readInt(); // txnLength
-//    int32_t partitionHash = taskInfo->readInt(); // partitionHash
-//    ASSERT_TRUE(m_engine->isLocalSite(partitionHash)); // -1
-//    type = static_cast<DRRecordType>(taskInfo->readByte());
-//    ASSERT_EQ(DR_RECORD_END_TXN, type);
-//
-//    applyNull();
-//    ASSERT_EQ(0, m_topend.blocks.size());
-//
-//    beginTxn(m_engine, 100, 100, 99, 71);
-//    endTxn(m_engine, true);
-//    flushAndApply(100);
-//
-//    EXPECT_EQ(0, m_table->activeTupleCount());
-//    EXPECT_EQ(0, m_tableReplica->activeTupleCount());
-//    ASSERT_EQ(0, m_topend.blocks.size());
-//
-//    // read-only
-//    int64_t prevUndoToken = m_undoToken;
-//    m_undoToken = INT64_MAX;
-//    beginTxn(m_engine, 101, 101, 100, 72);
-//    endTxn(m_engine, true);
-//    ASSERT_FALSE(flush(101));
-//    ASSERT_EQ(0, m_topend.blocks.size());
-//    ASSERT_EQ(INT64_MAX, m_undoToken);
-//    m_undoToken = prevUndoToken;
-//
-//    s_multiPartitionFlag = false;
-//}
+/*
+ * Conflict detection test case - Delete Missing Tuple
+ *
+ * | Time | DB A                          | DB B                          |
+ * |------+-------------------------------+-------------------------------|
+ * | T70  | insert 42 (pk), 55555 (uk), X | insert 42 (pk), 55555 (uk), X |
+ * | T71  |                               | delete 42 (pk), 55555 (uk), X |
+ * | T72  | delete 42 (pk), 55555 (uk), X |                               |
+ *
+ * DB B reports: <DELETE missing row>
+ * existingRow: <null>
+ * expectedRow: <42, 5555, X>
+ * deletedRow:  <>
+ *               <INSERT no conflict>
+ * existingRow: <null>
+ * newRow:      <null>
+ */
+TEST_F(DRBinaryLogTest, DetectDeleteMissingTuple) {
+    enableActiveActive();
+    createUniqueIndexes();
+
+    // insert rows on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
+    // do a deep copy because temp tuple of m_table will be rewritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // delete row on replica
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 100, 100, 99, 71);
+        deleteTuple(m_tableReplica, expectedTuple);
+        endTxn(m_engineReplica, true);
+        flushButDontApply(100);
+    }
+
+    // delete the same row on master then wait to trigger conflict on replica
+    beginTxn(m_engine, 101, 101, 100, 72);
+    deleteTuple(m_table, expectedTuple);
+    endTxn(m_engine, true);
+    // trigger a delete missing tuple conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_DELETE);
+
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISSING);
+    // verify existing table
+    EXPECT_EQ(0, m_topend.existingTupleRowsForDelete->activeTupleCount());
+    // verfiy expected table
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple = */verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
+    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
+    ASSERT_TRUE(m_topend.newTupleRowsForInsert.get() == NULL);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(2, exportStream->receivedTuples.size());
+}
+
+/*
+ * Conflict detection test case - Delete Timestamp Mismatch
+ *
+ * | Time | DB A                          | DB B                                    |
+ * |------+-------------------------------+-----------------------------------------|
+ * | T70  | insert 42 (pk), 55555 (uk), X | insert 42 (pk), 55555 (uk), X           |
+ * | T71  |                               | update <42, 55555, X> to <42, 1234, X>  |
+ * | T72  | delete 42 (pk), 55555 (uk), X |                                         |
+ *
+ * DB B reports: <DELETE timestamp mismatch>
+ * existingRow: <42, 1234, X>
+ * expectedRow: <42, 5555, X>
+ * deletedRow:  <>
+ *               <INSERT no conflict>
+ * existingRow: <null>
+ * newRow:      <null>
+ */
+TEST_F(DRBinaryLogTest, DetectDeleteTimestampMismatch) {
+    enableActiveActive();
+    createUniqueIndexes();
+
+    // insert one row on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
+    // do a deep copy because temp tuple of replica table will be rewritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // insert a few rows and update one row on replica
+    beginTxn(m_engine, 100, 100, 99, 71);
+    TableTuple tempExistingTuple = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42/*causes a constraint violation*/, 1234);
+    // do a deep copy because temp tuple of replica table will be overwritten when applying binary log
+    StandAloneTupleStorage existingTupleStorage(m_tableReplica->schema());
+    TableTuple existingTuple = existingTupleStorage.tuple();
+    deepCopy(&existingTuple, tempExistingTuple);
+    endTxn(m_engine, true);
+    flushButDontApply(100);
+
+    // delete the row on master then wait to trigger conflict on replica
+    beginTxn(m_engine, 101, 101, 100, 72);
+    deleteTuple(m_table, tempExpectedTuple);
+    endTxn(m_engine, true);
+    // trigger a delete timestamp mismatch conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_DELETE);
+
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTuple, true);
+    // verify expected table
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
+    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
+    ASSERT_TRUE(m_topend.newTupleRowsForInsert.get() == NULL);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(3, exportStream->receivedTuples.size());
+}
+
+/*
+ * Conflict detection test case - Update Unique Constraint Violation
+ *
+ * | Time | DB A                                    | DB B                           |
+ * |------+-----------------------------------------+--------------------------------|
+ * | T70  | insert 24 (pk), 2321 (uk), X            | insert 24 (pk), 2321 (uk), X   |
+ * | T71  |                                         | insert 42 (pk), 55555 (uk), Y  |
+ * |      |                                         | insert 123 (pk), 33333 (uk), Z |
+ * | T72  | update <24, 2321, X> to <12, 33333, X> |                                |
+ *
+ * DB B reports: <DELETE no conflict>
+ * existingRow: <null>
+ * expectedRow: <24, 2321, X>
+ *               <INSERT constraint violation>
+ * existingRow: <123, 33333, Z>
+ * newRow:      <12, 33333, X>
+ */
+TEST_F(DRBinaryLogTest, DetectUpdateUniqueConstraintViolation) {
+    enableActiveActive();
+    createUniqueIndexes();
+    ASSERT_FALSE(flush(98));
+
+    // insert row on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
+    // do a deep copy because temp tuple of relica table will be rewritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+
+    insertTuple(m_table, prepareTempTuple(m_table, 111, 11111, "11111.1111", "second", "this is starting to get even sillier", 2222));
+    insertTuple(m_table, prepareTempTuple(m_table, 65, 22222, "22222.2222", "third", "this is starting to get even sillier", 2222));
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // insert rows on replica side
+    StandAloneTupleStorage existingTupleStorage(m_tableReplica->schema());
+    TableTuple existingTuple = existingTupleStorage.tuple();
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 100, 100, 99, 71);
+        insertTuple(m_tableReplica, prepareTempTuple(m_tableReplica, 42, 55555, "349508345.34583", "a thing",
+                                                     "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.",
+                                                     5433));
+
+        TableTuple tempExistingTuple = insertTuple(m_tableReplica,
+                                                   prepareTempTuple(m_tableReplica, 123, 33333, "122308345.34583",
+                                                                    "another thing",
+                                                                    "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.",
+                                                                    5433));
+        // do a deep copy because temp tuple of replica table will be overwritten when applying binary log
+        deepCopy(&existingTuple, tempExistingTuple);
+        endTxn(m_engineReplica, true);
+        flushButDontApply(100);
+    }
+
+    // update row on master to create conflict
+    beginTxn(m_engine, 101, 101, 100, 72);
+    TableTuple newTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 12, 33333/*causes a constraint violation*/);
+    endTxn(m_engine, true);
+
+    // trigger a update unique constraint violation conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
+
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, NO_CONFLICT);
+    ASSERT_TRUE(m_topend.existingTupleRowsForDelete.get() == NULL);
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExistingTableForInsert(existingTuple);
+    // verify new table
+    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyNewTableForInsert(newTuple);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(3, exportStream->receivedTuples.size());
+}
+
+/*
+ * Conflict detection test case - Update Missing Tuple
+ *
+ * | Time | DB A                                    | DB B                                     |
+ * |------+-----------------------------------------+------------------------------------------|
+ * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
+ * | T71  |                                         | update <42, 55555, X> to <35, 12345, X>  |
+ * | T72  | update <42, 55555, X> to <42, 54321, X> |                                          |
+ *
+ * DB B reports: <DELETE missing row>
+ * existingRow: <null>
+ * expectedRow: <42, 55555, X>
+ *               <INSERT no conflict>
+ * existingRow: <null>
+ * newRow:      <42, 54321, X>
+ */
+TEST_F(DRBinaryLogTest, DetectUpdateMissingTuple) {
+    enableActiveActive();
+    createUniqueIndexes();
+
+    // insert rows on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // update one row on replica
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 100, 100, 99, 71);
+        updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 35, 12345);
+        endTxn(m_engineReplica, true);
+        flushButDontApply(100);
+    }
+
+    // update the same row on master then wait to trigger conflict on replica
+    beginTxn(m_engine, 101, 101, 100, 72);
+    TableTuple tempNewTuple = updateTupleFirstAndSecondColumn(m_table, expectedTuple, 42, 54321);
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage newTupleStorage(m_table->schema());
+    TableTuple newTuple = newTupleStorage.tuple();
+    deepCopy(&newTuple, tempNewTuple);
+    endTxn(m_engine, true);
+    // trigger a update missing tuple conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
+
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISSING);
+    // verify existing table
+    EXPECT_EQ(0, m_topend.existingTupleRowsForDelete->activeTupleCount());
+    // verify expected table
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
+    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
+    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyNewTableForInsert(newTuple);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(2, exportStream->receivedTuples.size());
+}
+
+
+/*
+ * Conflict detection test case - Update missing tuple and new row triggers constraint
+ *
+ * | Time | DB A                                    | DB B                                     |
+ * |------+-----------------------------------------+------------------------------------------|
+ * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
+ * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
+ * |      | insert 72 (pk), 345 (uk), Z             | insert 72 (pk), 345 (uk), Z              |
+ * | T71  |                                         | delete <42, 55555, X>                    |
+ * |      |                                         | insert 36 (pk), 12345 (uk), X            |
+ * | T72  | update <42, 55555, X> to <42, 12345, X> |                                          |
+ *
+ * DB B reports: <DELETE missing row>
+ * existingRow: <null>
+ * expectedRow: <42, 55555, X>
+ *               <INSERT constraint violation>
+ * existingRow: <36, 12345, X>
+ * newRow:      <42, 12345, X>
+ */
+TEST_F(DRBinaryLogTest, DetectUpdateMissingTupleAndNewRowConstraint) {
+    enableActiveActive();
+    createUniqueIndexes();
+
+    // insert rows on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
+    insertTuple(m_table, prepareTempTuple(m_table, 72, 345, "4256.345", "something", "more tuple data, really not the same", 1812));
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // update one row on replica
+    StandAloneTupleStorage existingTupleStorage(m_tableReplica->schema());
+    TableTuple existingTuple = existingTupleStorage.tuple();
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 100, 100, 99, 71);
+        deleteTuple(m_tableReplica, tempExpectedTuple);
+        TableTuple tempExistingTuple = insertTuple(m_tableReplica,
+                                                   prepareTempTuple(m_tableReplica, 36, 12345, "349508345.34583",
+                                                                    "a thing",
+                                                                    "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.",
+                                                                    5433));
+        // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
+        deepCopy(&existingTuple, tempExistingTuple);
+        endTxn(m_engineReplica, true);
+        flushButDontApply(100);
+    }
+
+    // update the same row on master then wait to trigger conflict on replica
+    beginTxn(m_engine, 101, 101, 100, 72);
+    TableTuple newTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 12345/*causes a constraint violation*/);
+    endTxn(m_engine, true);
+    // trigger a update missing tuple conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
+
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISSING);
+    // verify existing table
+    EXPECT_EQ(0, m_topend.existingTupleRowsForDelete->activeTupleCount());
+    // verify expected table
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyExistingTableForInsert(existingTuple);
+    // verify new table
+    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple3 = */verifyNewTableForInsert(newTuple);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(3, exportStream->receivedTuples.size());
+}
+
+/*
+ * Conflict detection test case - Update Timestamp Mismatch
+ *
+ * | Time | DB A                                    | DB B                                     |
+ * |------+-----------------------------------------+------------------------------------------|
+ * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
+ * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
+ * |      | insert 72 (pk), 345 (uk), Z             | insert 72 (pk), 345 (uk), Z              |
+ * | T71  |                                         | update <42, 55555, X> to <42, 12345, X>  |
+ * | T72  | update <42, 55555, X> to <42, 54321, X> |                                          |
+ *
+ * DB B reports: <DELETE timestamp mismatch>
+ * existingRow: <42, 12345, X>
+ * expectedRow: <42, 55555, X>
+ *               <INSERT no conflict>
+ * existingRow: <null>
+ * newRow:      <42, 54321, X>
+ */
+TEST_F(DRBinaryLogTest, DetectUpdateTimestampMismatch) {
+    enableActiveActive();
+    createUniqueIndexes();
+
+    // insert one row on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
+    insertTuple(m_table, prepareTempTuple(m_table, 72, 345, "4256.345", "something", "more tuple data, really not the same", 1812));
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // update one row on replica
+    StandAloneTupleStorage existingTupleStorage(m_tableReplica->schema());
+    TableTuple existingTuple = existingTupleStorage.tuple();
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 100, 100, 99, 71);
+        TableTuple tempExistingTuple = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42, 12345);
+        // do a deep copy because temp tuple of replica table will be overwritten when applying binary log
+        deepCopy(&existingTuple, tempExistingTuple);
+        endTxn(m_engineReplica, true);
+        flushButDontApply(100);
+    }
+
+    // update the same row on master then wait to trigger conflict on replica
+    beginTxn(m_engine, 101, 101, 100, 72);
+    TableTuple tempNewTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 54321);
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage newTupleStorage(m_table->schema());
+    TableTuple newTuple = newTupleStorage.tuple();
+    deepCopy(&newTuple, tempNewTuple);
+    endTxn(m_engine, true);
+    // trigger a update timestamp mismatch conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
+
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTuple, true);
+    // verify expected table
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
+    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
+    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple3 = */verifyNewTableForInsert(newTuple);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(3, exportStream->receivedTuples.size());
+}
+
+/*
+ * Conflict detection test case - Update Timestamp Mismatch Rejected
+ *
+ * | Time | DB A                                    | DB B                                     |
+ * |------+-----------------------------------------+------------------------------------------|
+ * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
+ * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
+ * |      | insert 72 (pk), 345 (uk), Z             | insert 72 (pk), 345 (uk), Z              |
+ * | T71  | update <42, 55555, X> to <42, 12345, X> |                                          |
+ * | T72  |                                         | update <42, 55555, X> to <42, 54321, X>  |
+ *
+ * DB B reports: <DELETE timestamp mismatch>
+ * existingRow: <42, 54321, X>
+ * expectedRow: <42, 55555, X>
+ *               <INSERT no conflict>
+ * existingRow: <null>
+ * newRow:      <42, 12345, X>
+ */
+TEST_F(DRBinaryLogTest, DetectUpdateTimestampMismatchRejected) {
+    enableActiveActive();
+    createUniqueIndexes();
+
+    // insert one row on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
+    insertTuple(m_table, prepareTempTuple(m_table, 72, 345, "4256.345", "something", "more tuple data, really not the same", 1812));
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // update one row on replica
+    beginTxn(m_engine, 100, 100, 99, 71);
+    TableTuple tempNewTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 12345);
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage newTupleStorage(m_table->schema());
+    TableTuple newTuple = newTupleStorage.tuple();
+    deepCopy(&newTuple, tempNewTuple);
+    endTxn(m_engine, true);
+    flush(100);
+
+    // update the same row on master then wait to trigger conflict on replica
+    StandAloneTupleStorage existingTupleStorage(m_tableReplica->schema());
+    TableTuple existingTuple = existingTupleStorage.tuple();
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 101, 101, 100, 72);
+        TableTuple tempExistingTuple = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42, 54321);
+        // do a deep copy because temp tuple of relica table will be overwritten when applying binary log
+        deepCopy(&existingTuple, tempExistingTuple);
+        endTxn(m_engineReplica, true);
+        // trigger a update timestamp mismatch conflict
+        flushAndApply(101);
+    }
+
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
+
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTuple, false);
+    // verify expected table
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, NO_CONFLICT);
+    ASSERT_TRUE(m_topend.existingTupleRowsForInsert.get() == NULL);
+    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple3 = */verifyNewTableForInsert(newTuple);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(3, exportStream->receivedTuples.size());
+}
+
+/**
+ * Conflict detection test case - Update timstamp mismatch and new row triggers unique
+ * constraint violation.
+ *
+ * | Time | DB A                                    | DB B                                     |
+ * |------+-----------------------------------------+------------------------------------------|
+ * | T70  | insert 42 (pk), 55555 (uk), X           | insert 42 (pk), 55555 (uk), X            |
+ * |      | insert 24 (pk), 2321 (uk), Y            | insert 24 (pk), 2321 (uk), Y             |
+ * | T71  |                                         | update <42, 55555, X> to <42, 12345, X>  |
+ * |      |                                         | insert 72 (pk), 345 (uk), Z              |
+ * | T72  | update <42, 55555, X> to <42, 345, X> |                                          |
+ *
+ * DB B reports: <DELETE timestamp mismatch>
+ * existingRow: <42, 12345, X>
+ * expectedRow: <42, 55555, X>
+ *               <INSERT constraint violation>
+ * existingRow: <72, 345, Z>
+ * newRow:      <42, 345, X>
+ */
+TEST_F(DRBinaryLogTest, DetectUpdateTimestampMismatchAndNewRowConstraint) {
+    enableActiveActive();
+    createUniqueIndexes();
+
+    // insert one row on both side
+    beginTxn(m_engine, 99, 99, 98, 70);
+    TableTuple tempExpectedTuple = insertTuple(m_table, prepareTempTuple(m_table, 42, 55555, "349508345.34583", "a thing", "this is a rather long string of text that is used to cause nvalue to use outline storage for the underlying data. It should be longer than 64 bytes.", 5433));
+    // do a deep copy because temp tuple of table will be overwritten later
+    StandAloneTupleStorage expectedTupleStorage(m_table->schema());
+    TableTuple expectedTuple = expectedTupleStorage.tuple();
+    deepCopy(&expectedTuple, tempExpectedTuple);
+    insertTuple(m_table, prepareTempTuple(m_table, 24, 2321, "23455.5554", "and another", "this is starting to get even sillier", 2222));
+    endTxn(m_engine, true);
+    flushAndApply(99);
+
+    // update one row on replica
+    StandAloneTupleStorage existingTupleFirstStorage(m_tableReplica->schema());
+    TableTuple existingTupleFirst = existingTupleFirstStorage.tuple();
+    StandAloneTupleStorage existingTupleSecondStorage(m_tableReplica->schema());
+    TableTuple existingTupleSecond = existingTupleSecondStorage.tuple();
+    {
+        ReplicaProcessContextSwitcher switcher;
+        beginTxn(m_engineReplica, 100, 100, 99, 71);
+        TableTuple tempExistingTupleFirst = updateTupleFirstAndSecondColumn(m_tableReplica, tempExpectedTuple, 42,
+                                                                            12345);
+        // do a deep copy because temp tuple of replica table will be overwritten when applying binary log
+        deepCopy(&existingTupleFirst, tempExistingTupleFirst);
+        TableTuple tempExistingTupleSecond = insertTuple(m_tableReplica,
+                                                         prepareTempTuple(m_tableReplica, 72, 345, "4256.345",
+                                                                          "something",
+                                                                          "more tuple data, really not the same",
+                                                                          1812));
+        // do a deep copy because temp tuple of replica table will be overwritten when applying binary log
+        deepCopy(&existingTupleSecond, tempExistingTupleSecond);
+        endTxn(m_engineReplica, true);
+        flushButDontApply(100);
+    }
+
+    // update the same row on master then wait to trigger conflict on replica
+    beginTxn(m_engine, 101, 101, 100, 72);
+    TableTuple newTuple = updateTupleFirstAndSecondColumn(m_table, tempExpectedTuple, 42, 345/*cause a constraint violation*/);
+    endTxn(m_engine, true);
+    // trigger a update timestamp mismatch conflict
+    flushAndApply(101);
+
+    EXPECT_EQ(2, m_table->activeTupleCount());
+    EXPECT_EQ(3, m_tableReplica->activeTupleCount());
+    EXPECT_EQ(m_topend.actionType, DR_RECORD_UPDATE);
+    // 1. check delete conflict part
+    EXPECT_EQ(m_topend.deleteConflictType, CONFLICT_EXPECTED_ROW_MISMATCH);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple1 = */verifyExistingTableForDelete(existingTupleFirst, true);
+    // verify expected table
+    EXPECT_EQ(1, m_topend.expectedTupleRowsForDelete->activeTupleCount());
+    /*TableTuple exportTuple2 = */verifyExpectedTableForDelete(expectedTuple);
+
+    // 2. check insert conflict part
+    EXPECT_EQ(m_topend.insertConflictType, CONFLICT_CONSTRAINT_VIOLATION);
+    // verify existing table
+    EXPECT_EQ(1, m_topend.existingTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple3 = */verifyExistingTableForInsert(existingTupleSecond);
+    // verify new table
+    EXPECT_EQ(1, m_topend.newTupleRowsForInsert->activeTupleCount());
+    /*TableTuple exportTuple4 = */verifyNewTableForInsert(newTuple);
+
+    // 3. check export
+    MockExportTupleStream *exportStream = reinterpret_cast<MockExportTupleStream*>(m_engineReplica->getExportTupleStream());
+    EXPECT_EQ(4, exportStream->receivedTuples.size());
+}
+
+TEST_F(DRBinaryLogTest, InsertOverBufferLimit) {
+    createIndexes();
+    const int total = 400;
+    int spHandle = 1;
+
+    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+    try {
+        for (int i = 1; i <= total; i++) {
+            insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+        }
+    } catch (SerializableEEException& e) {
+        endTxn(m_engine, false);
+        spHandle++;
+
+        for (int i = 1; i <= total; i++, spHandle++) {
+            beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+            insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+            endTxn(m_engine, true);
+        }
+
+        return;
+    }
+
+    ASSERT_TRUE(false);
+}
+
+TEST_F(DRBinaryLogTest, UpdateOverBufferLimit) {
+    createIndexes();
+    const int total = 150;
+    long spHandle = 1;
+
+    for (int i = 0; i < total; i++, spHandle++) {
+        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+        endTxn(m_engine, true);
+    }
+
+    flushAndApply(spHandle-1);
+
+    // Update all tuples
+    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+    spHandle++;
+    try {
+        // Update all rows to new values and update them back to the original
+        // values. It would overflow the DR buffer limit and cause the txn to
+        // roll back.
+        for (int i = 0; i < total; i++) {
+            TableTuple newTuple = prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i);
+            TableTuple oldTuple = m_table->lookupTupleByValues(newTuple);
+            newTuple.setNValue(1, ValueFactory::getBigIntValue(i+total));
+            updateTuple(m_table, oldTuple, newTuple);
+        }
+        for (int i = 0; i < total; i++) {
+            TableTuple newTuple = prepareTempTuple(m_table, 42, i+total, "349508345.34583", "a thing", "a totally different thing altogether", i);
+            TableTuple oldTuple = m_table->lookupTupleByValues(newTuple);
+            newTuple.setNValue(1, ValueFactory::getBigIntValue(i));
+            updateTuple(m_table, oldTuple, newTuple);
+        }
+    } catch (SerializableEEException& e) {
+        endTxn(m_engine, false);
+
+        // Make sure all changes rolled back
+        for (int i = 0; i < total; i++) {
+            TableTuple tuple = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+            ASSERT_FALSE(tuple.isNullTuple());
+
+            TableTuple tuple2 = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i+total, "349508345.34583", "a thing", "a totally different thing altogether", i));
+            ASSERT_TRUE(tuple2.isNullTuple());
+        }
+
+        return;
+    }
+    ASSERT_TRUE(false);
+}
+
+TEST_F(DRBinaryLogTest, DeleteOverBufferLimit) {
+    createIndexes();
+    const int total = 2000;
+    int spHandle = 1;
+
+    for (int i = 1; i <= total; i++, spHandle++) {
+        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+        endTxn(m_engine, true);
+    }
+
+    flushAndApply(spHandle - 1);
+
+    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+    try {
+        // Delete all rows. It would overflow the DR buffer limit and cause the
+        // txn to roll back.
+        for (int i = 1; i <= total; i++) {
+            TableTuple tuple = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+            deleteTuple(m_table, tuple);
+        }
+    } catch (SerializableEEException& e) {
+        endTxn(m_engine, false);
+        spHandle++;
+
+        // Make sure all changes rolled back, try to delete each tuple in single
+        // txn to make sure indexes are also correct
+        for (int i = 1; i <= total; i++, spHandle++) {
+            beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+            TableTuple tuple = m_table->lookupTupleByValues(prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+            ASSERT_FALSE(tuple.isNullTuple());
+
+            deleteTuple(m_table, tuple);
+            endTxn(m_engine, true);
+        }
+
+        return;
+    }
+    ASSERT_TRUE(false);
+}
+
+// This test doesn't run in the memcheck build because the tuple block can only
+// hold one tuple at a time, so it will never trigger the optimized truncation
+// path. The normal truncation path will fail because we don't have a catalog
+// loaded.
+TEST_F(DRBinaryLogTest, TruncateTable) {
+#ifndef MEMCHECK
+    createIndexes();
+    const int total = 150;
+    int spHandle = 1;
+
+    for (int i = 1; i <= total; i++, spHandle++) {
+        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+        endTxn(m_engine, true);
+    }
+
+    flushAndApply(spHandle - 1);
+    EXPECT_EQ(total, m_table->activeTupleCount());
+    EXPECT_EQ(total, m_tableReplica->activeTupleCount());
+
+    beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+    m_table->truncateTable(m_engine);
+    endTxn(m_engine, true);
+
+    flushAndApply(spHandle);
+    EXPECT_EQ(0, m_table->activeTupleCount());
+    EXPECT_EQ(0, m_tableReplica->activeTupleCount());
+#endif
+}
+
+TEST_F(DRBinaryLogTest, IgnoreTableRowLimit) {
+    m_tableReplica->setTupleLimit(100);
+
+    const int total = 101;
+    int spHandle = 1;
+
+    for (int i = 1; i <= total; i++, spHandle++) {
+        beginTxn(m_engine, spHandle, spHandle, spHandle-1, spHandle);
+        insertTuple(m_table, prepareTempTuple(m_table, 42, i, "349508345.34583", "a thing", "a totally different thing altogether", i));
+        endTxn(m_engine, true);
+    }
+
+    flushAndApply(spHandle - 1);
+
+    EXPECT_EQ(101, m_tableReplica->activeTupleCount());
+}
+
+TEST_F(DRBinaryLogTest, MultiPartNoDataChange) {
+    beginTxn(m_engine, 98, 98, 97, 69);
+    endTxn(m_engine, true);
+    ASSERT_FALSE(flush(98));
+    ASSERT_EQ(0, m_topend.blocks.size());
+
+    s_multiPartitionFlag = true;
+
+    beginTxn(m_engine, 99, 99, 98, 70);
+    endTxn(m_engine, true);
+    ASSERT_TRUE(flush(99));
+
+    EXPECT_EQ(0, m_table->activeTupleCount());
+    EXPECT_EQ(0, m_tableReplica->activeTupleCount());
+    ASSERT_EQ(2, m_topend.blocks.size());
+
+    std::unique_ptr<CopySerializeInputLE> taskInfo(getDRTaskInfo());
+    taskInfo->readByte(); // DR version
+    DRRecordType type = static_cast<DRRecordType>(taskInfo->readByte());
+    ASSERT_EQ(DR_RECORD_BEGIN_TXN, type);
+    taskInfo->readLong(); // uniqueId
+    taskInfo->readLong(); // sequenceNumber
+    DRTxnPartitionHashFlag hashFlag =
+            static_cast<DRTxnPartitionHashFlag>(taskInfo->readByte()); // hashFlag
+    ASSERT_EQ(TXN_PAR_HASH_PLACEHOLDER, hashFlag);
+    taskInfo->readInt(); // txnLength
+    int32_t partitionHash = taskInfo->readInt(); // partitionHash
+    ASSERT_TRUE(m_engine->isLocalSite(partitionHash)); // -1
+    type = static_cast<DRRecordType>(taskInfo->readByte());
+    ASSERT_EQ(DR_RECORD_END_TXN, type);
+
+    applyNull();
+    ASSERT_EQ(0, m_topend.blocks.size());
+
+    beginTxn(m_engine, 100, 100, 99, 71);
+    endTxn(m_engine, true);
+    flushAndApply(100);
+
+    EXPECT_EQ(0, m_table->activeTupleCount());
+    EXPECT_EQ(0, m_tableReplica->activeTupleCount());
+    ASSERT_EQ(0, m_topend.blocks.size());
+
+    // read-only
+    int64_t prevUndoToken = m_undoToken;
+    m_undoToken = INT64_MAX;
+    beginTxn(m_engine, 101, 101, 100, 72);
+    endTxn(m_engine, true);
+    ASSERT_FALSE(flush(101));
+    ASSERT_EQ(0, m_topend.blocks.size());
+    ASSERT_EQ(INT64_MAX, m_undoToken);
+    m_undoToken = prevUndoToken;
+
+    s_multiPartitionFlag = false;
+}
 
 int main() {
     return TestSuite::globalInstance()->runAll();

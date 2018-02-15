@@ -66,7 +66,6 @@ ThreadLocalPool::ThreadLocalPool()
         PoolPairType* refCountedPools = new PoolPairType(1, pools);
         pthread_setspecific(m_key, static_cast<const void *>(refCountedPools));
         pthread_setspecific(m_stringKey, static_cast<const void*>(new CompactingStringStorage()));
-        std::cerr << " *** *** SP site string storage: " << pthread_getspecific(m_stringKey) << std::endl;
 #ifdef VOLT_DEBUG_ENABLED
         m_allocatingEngine = -1;
         m_allocatingThread = -1;
