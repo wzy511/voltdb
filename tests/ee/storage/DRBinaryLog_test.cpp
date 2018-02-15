@@ -438,12 +438,13 @@ public:
         delete m_otherTableWithoutIndex;
         delete m_engine;
 
-        {
-            ReplicaProcessContextSwitcher switcher;
-            delete m_otherTableWithIndexReplica;
-            delete m_otherTableWithoutIndexReplica;
-            delete m_engineReplica;
-        }
+        ClusterCtx cc = s_clusterMap[CLUSTER_ID_REPLICA];
+        SynchronizedThreadLock::setEngineLocalsForTest(cc.getEngine()->getPartitionId(),
+                                                       cc.getMpEngineLocals(),
+                                                       cc.getEnginesByPartitionId());
+        delete m_otherTableWithIndexReplica;
+        delete m_otherTableWithoutIndexReplica;
+        delete m_engineReplica;
 
         s_clusterMap.clear();
         SynchronizedThreadLock::resetEngineLocalsForTest();
