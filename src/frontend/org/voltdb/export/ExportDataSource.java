@@ -738,6 +738,7 @@ public class ExportDataSource implements Comparable<ExportDataSource> {
         final BBContainer m_backingCont;
         public AckingContainer(BBContainer cont, long uso) {
             super(cont.b());
+            exportLog.info("Perparing USO " + uso + " on partition " + m_partitionId);
             m_uso = uso;
             m_backingCont = cont;
         }
@@ -751,6 +752,7 @@ public class ExportDataSource implements Comparable<ExportDataSource> {
                     public void run() {
                         try {
                             m_backingCont.discard();
+                            exportLog.info("Discarding USO " + m_uso + " on partition " + m_partitionId);
                             try {
                                 if (!m_es.isShutdown()) {
                                     ackImpl(m_uso);
