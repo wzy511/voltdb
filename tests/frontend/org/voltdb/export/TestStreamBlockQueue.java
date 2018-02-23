@@ -66,7 +66,7 @@ public class TestStreamBlockQueue {
 
     private static StreamBlock getStreamBlockWithFill(byte fillValue) {
         g_uso += 1024 * 1024 * 2;
-        return new StreamBlock(DBBPool.wrapBB(getFilledBuffer(fillValue)), g_uso, false);
+        return new StreamBlock(DBBPool.wrapBB(getFilledBuffer(fillValue)), g_uso, 1, false);
     }
 
     @Test
@@ -82,7 +82,7 @@ public class TestStreamBlockQueue {
         System.gc();
         System.gc();
         System.runFinalization();
-        m_sbq = new StreamBlockQueue(  TEST_DIR, TEST_NONCE);
+        m_sbq = new StreamBlockQueue(TEST_DIR, TEST_NONCE, 1);
         sb = m_sbq.peek();
         assertFalse(m_sbq.isEmpty());
         assertEquals(m_sbq.sizeInBytes(), 1024 * 1024 * 2);//USO and length prefix on disk
@@ -368,7 +368,7 @@ public class TestStreamBlockQueue {
         m_sbq = null;
         System.gc();
         System.runFinalization();
-        m_sbq = new StreamBlockQueue(  TEST_DIR, TEST_NONCE);
+        m_sbq = new StreamBlockQueue(TEST_DIR, TEST_NONCE, 1);
         System.gc();
         System.runFinalization();
         StreamBlock sb = null;
@@ -543,7 +543,7 @@ public class TestStreamBlockQueue {
             testDir.delete();
         }
         testDir.mkdir();
-        m_sbq = new StreamBlockQueue(  TEST_DIR, TEST_NONCE);
+        m_sbq = new StreamBlockQueue(TEST_DIR, TEST_NONCE, 1);
         defaultBuffer.clear();
     }
 

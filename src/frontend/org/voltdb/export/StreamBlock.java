@@ -20,6 +20,7 @@ package org.voltdb.export;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.DBBPool.BBContainer;
 import org.voltdb.VoltDB;
 
@@ -46,13 +47,17 @@ public class StreamBlock {
 
     public static final int HEADER_SIZE = 8;
 
-    StreamBlock(BBContainer cont, long uso, boolean isPersisted) {
+    private static final VoltLogger exportLog = new VoltLogger("EXPORT");
+
+    StreamBlock(BBContainer cont, long uso, int partitionId, boolean isPersisted) {
         m_buffer = cont;
         m_uso = uso;
+        m_partitionId = partitionId;
         //The first 8 bytes are space for us to store the USO if we end up persisting
         m_buffer.b().position(HEADER_SIZE);
         m_totalUso = m_buffer.b().remaining();
         m_isPersisted = isPersisted;
+        exportLog.info("Perparing USO " + uso + (m_isPersisted?" from PBD on partition ":" from SITE on partition ") + m_partitionId);
     }
 
     private final AtomicInteger m_refCount = new AtomicInteger(1);
@@ -62,6 +67,7 @@ public class StreamBlock {
      */
     void discard() {
         final int count = m_refCount.decrementAndGet();
+        exportLog.info("Discarding USO " + m_uso + (m_isPersisted?" from PBD on partition ":" from SITE on partition ") + m_partitionId);
         if (count == 0) {
             m_buffer.discard();
             m_buffer = null;
@@ -111,6 +117,7 @@ public class StreamBlock {
         return m_isPersisted;
     }
 
+    private final int m_partitionId;
     private final long m_uso;
     private final long m_totalUso;
     private BBContainer m_buffer;

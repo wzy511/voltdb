@@ -60,11 +60,13 @@ public class StreamBlockQueue {
     private final String m_nonce;
     private final String m_path;
     private final BinaryDequeReader m_reader;
+    private final int m_partitionId;
 
-    public StreamBlockQueue(String path, String nonce) throws java.io.IOException {
+    public StreamBlockQueue(String path, String nonce, int partitionId) throws java.io.IOException {
         m_persistentDeque = new PersistentBinaryDeque( nonce, new VoltFile(path), exportLog);
         m_path = path;
         m_nonce = nonce;
+        m_partitionId = partitionId;
         m_reader = m_persistentDeque.openForRead(m_nonce);
     }
 
@@ -101,7 +103,7 @@ public class StreamBlockQueue {
             //Pass the stream block a subset of the bytes, provide
             //a container that discards the original returned by the persistent deque
             StreamBlock block = new StreamBlock( fcont,
-                uso,
+                uso, m_partitionId,
                 true);
 
             //Optionally store a reference to the block in the in memory deque

@@ -136,7 +136,7 @@ public class ExportDataSource implements Comparable<ExportDataSource> {
         crc.update(m_signatureBytes);
         String nonce = m_tableName + "_" + crc.getValue() + "_" + partitionId;
 
-        m_committedBuffers = new StreamBlockQueue(overflowPath, nonce);
+        m_committedBuffers = new StreamBlockQueue(overflowPath, nonce, partitionId);
 
         /*
          * This is not the catalog relativeIndex(). This ID incorporates
@@ -251,7 +251,7 @@ public class ExportDataSource implements Comparable<ExportDataSource> {
         PureJavaCrc32 crc = new PureJavaCrc32();
         crc.update(m_signatureBytes);
         final String nonce = m_tableName + "_" + crc.getValue() + "_" + m_partitionId;
-        m_committedBuffers = new StreamBlockQueue(overflowPath, nonce);
+        m_committedBuffers = new StreamBlockQueue(overflowPath, nonce, m_partitionId);
         //EDS created from adfile is always from disk.
         m_isInCatalog = false;
         m_eos = false;
@@ -451,7 +451,7 @@ public class ExportDataSource implements Comparable<ExportDataSource> {
                                     cont.discard();
                                     deleted.set(true);
                                 }
-                            }, uso, false));
+                            }, uso, m_partitionId, false));
                 } catch (IOException e) {
                     VoltDB.crashLocalVoltDB("Unable to write to export overflow.", true, e);
                 }
